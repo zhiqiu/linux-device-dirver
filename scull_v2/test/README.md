@@ -1,8 +1,7 @@
 # linux-device-dirver
-code for testing scull_driver  
-open scull0  
-write bytes  
-
+code for testing scull_driver
+open scull0
+write bytes
 lseek
 read bytes
 
