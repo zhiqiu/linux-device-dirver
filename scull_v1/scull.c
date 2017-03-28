@@ -153,6 +153,7 @@ ssize_t scull_write(struct file* filep, char __user* buf, size_t count, loff_t* 
 	}
 	if(!iter->data[s_pos]){
 		iter->data[s_pos] = kmalloc(quantum, GFP_KERNEL);
+		printk(KERN_EMERG "scull: write, kmalloc, address = %d\n", iter->data[s_pos]);
 		if(!iter->data[s_pos]){
 			goto out;
 		}

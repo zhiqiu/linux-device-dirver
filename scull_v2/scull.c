@@ -37,7 +37,12 @@ int scull_open(struct inode *inode, struct file *filep){
 
 	// 如果只写，则清0
 	if((filep->f_flags & O_ACCMODE) == O_WRONLY){
+	
+		if(down_interruptible(&dev->sem)){
+			return -ERESTARTSYS;
+		}
 		scull_trim(dev);
+		up(&dev->sem);
 	}
 	return 0;
 }
@@ -81,10 +86,9 @@ ssize_t scull_read(struct file* filep, char __user* buf, size_t count, loff_t* f
 
 	printk(KERN_EMERG "scull: read, count = %d\n", count);
 
-//  linux设备驱动程序书中第三章代码没有写初始化sem，直接使用sem会出错
-//	if(down_interruptible(&dev->sem)){
-//		return -ERESTARTSYS;
-//	}
+	if(down_interruptible(&dev->sem)){
+		return -ERESTARTSYS;
+	}
 	if(*f_pos >= dev->size){
 		goto out;
 	}
@@ -114,7 +118,7 @@ ssize_t scull_read(struct file* filep, char __user* buf, size_t count, loff_t* f
 	retval = count;
 
 out:
-//	up(&dev->sem);
+	up(&dev->sem);
 	return retval;
 }
 
@@ -130,9 +134,9 @@ ssize_t scull_write(struct file* filep, char __user* buf, size_t count, loff_t* 
 
 	printk(KERN_EMERG "scull: write, count = %d\n", count);
 
-//	if(down_interruptible(&dev->sem)){
-//		return -ERESTARTSYS;
-//	}
+	if(down_interruptible(&dev->sem)){
+		return -ERESTARTSYS;
+	}
 
 	//定位到第一个byte
 	item = (long)*f_pos / itemsize; //第几个qset
@@ -153,6 +157,7 @@ ssize_t scull_write(struct file* filep, char __user* buf, size_t count, loff_t* 
 	}
 	if(!iter->data[s_pos]){
 		iter->data[s_pos] = kmalloc(quantum, GFP_KERNEL);
+		printk(KERN_EMERG "scull: write, kmalloc, address = %d\n", iter->data[s_pos]);
 		if(!iter->data[s_pos]){
 			goto out;
 		}
@@ -173,7 +178,7 @@ ssize_t scull_write(struct file* filep, char __user* buf, size_t count, loff_t* 
 		dev->size = *f_pos;
 	}
 out:
-//	up(&dev->sem);
+	up(&dev->sem);
 	return retval;
 }
 
@@ -298,6 +303,9 @@ int scull_init(){
 	for(i = 0; i < scull_nr_devs; i++){
 		scull_devices[i].quantum = scull_quantum;
 		scull_devices[i].qset = scull_qset;
+		sema_init(&scull_devices[i].sem, 1);
+		//init_MUTEX(&scull_deviceis[i].sem);   init_MUTEX在新版本中被移除
+		//必须在setup_cdev之前设置信号量，在scull能被系统使用前。
 		scull_setup_cdev(&scull_devices[i], i);
 	}
 
