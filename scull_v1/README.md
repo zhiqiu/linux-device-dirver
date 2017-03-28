@@ -11,7 +11,7 @@ usage：
 
 
 
-after test
+after test  
 #sudo ./scull_unload  
 
 
