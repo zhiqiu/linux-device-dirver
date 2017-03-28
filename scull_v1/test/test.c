@@ -9,17 +9,23 @@ int main(){
 
 	char buf_write[] = "hello wrold scull\n";
 	char buf_read[1024];
-
+	// open
+	// open 返回值0,1,2分别对应stdin，stdout，stderr
 	if((file = open("/dev/scull0", O_RDWR)) == -1){
 		printf("Failed to open /dev/scull0\n");
 		return 0;
 	}
-	printf("Open /dev/scull0 success, %d\n", file);
+	printf("Open '/dev/scull0' success, file_id is %d\n", file);
+	
+	// write
 	res = write(file, buf_write, sizeof(buf_write));
 	if(res != -1){
-		printf("Write %d bytes\n", res);
+		printf("Write to scull0: %s\n", buf_write);
 	}
-    lseek(file, 0, SEEK_SET);
+	// lseek
+    res = lseek(file, 6, SEEK_SET);
+	printf("lseek to: %d\n", res);
+
 	res = read(file, buf_read, sizeof(buf_write));
 	if(res != -1){
 		printf("Read from scull0: %s \n", buf_read);
