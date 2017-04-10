@@ -1,9 +1,10 @@
-obj-m := cs4624.o
+obj-m := snd_cs4624.o
+
+snd_cs4624-objs := cs4624.o
 
 # 如果有多个源文件
 # obj-m := hello.o
 # hello-objs := file1.o file2.o file3.o
-
 
 KERNELDIR = /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)

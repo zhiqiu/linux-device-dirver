@@ -16,6 +16,9 @@
 MODULE_AUTHOR("CHENQL");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("pci driver for cs4624 card");
+MODULE_SUPPORTED_DEVICE("{{Cirrus Logic,Sound Fusion (CS4622)},"
+	"{Cirrus Logic,Sound Fusion (CS4624)}}");
+
 static char* id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;
 
 #define CS46XX_MIN_PERIOD_SIZE 64
@@ -172,6 +175,16 @@ static struct snd_pcm_ops snd_mycard_playback_ops = {
 //        .pointer =              snd_mycard_playback_direct_pointer,
 };
 
+static struct snd_pcm_ops snd_mycard_capture_ops = {
+        .open = snd_mycard_playback_open,
+        .close = snd_mycard_playback_close,
+        .ioctl = snd_pcm_lib_ioctl,
+        .hw_params =    snd_mycard_playback_hw_params,
+        .hw_free =              snd_mycard_playback_hw_free,
+        .prepare =              snd_mycard_playback_prepare,
+        .trigger =              snd_mycard_playback_trigger,
+//        .pointer =              snd_mycard_playback_direct_pointer,
+};
 
 //info回调函数用于获取control的详细信息。它的主要工作就是填充通过参数传入的snd_ctl_elem_info对象，以下例子是一个具有单个元素的boolean型control的info回调
 static int snd_my_ctl_info(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_info *uinfo){  
@@ -223,18 +236,26 @@ static struct snd_kcontrol_new snd_mycard_control = {
 
 struct mychip{
     struct snd_card *card;
+    struct snd_pcm *pcm;
+
 };
 
-      //然后，把芯片的专有数据注册为声卡的一个低阶设备
-        //注册为低阶设备主要是为了当声卡被注销时，芯片专用数据所占用的内存可以被自动地释放。
-        static int snd_mychip_dev_free(struct snd_device *device)
-        {
-            //return snd_chip_free(device->device_data);
-        }
+static int snd_mychip_free(struct mychip *chip){
+	
+	kfree(chip);
+}
+//然后，把芯片的专有数据注册为声卡的一个低阶设备
+//注册为低阶设备主要是为了当声卡被注销时，芯片专用数据所占用的内存可以被自动地释放。
+static int snd_mychip_dev_free(struct snd_device *device)
+{
+	struct mychip *chip = device->device_data;
 
-        static struct snd_device_ops ops = {
-            .dev_free = snd_mychip_dev_free,
-        };
+	return snd_mychip_free(chip);
+}
+
+static struct snd_device_ops mychip_dev_ops = {
+	.dev_free = snd_mychip_dev_free,
+};
 
 
 static int __init mycard_audio_probe(struct pci_dev *dev){
@@ -256,12 +277,11 @@ static int __init mycard_audio_probe(struct pci_dev *dev){
 	struct mychip *chip;
 
 	chip = kzalloc(sizeof(struct mychip), GFP_KERNEL);  //kzalloc会自动初始为0，相当于kmalloc+memset
-
 	chip->card = card;
 
 	//然后，把芯片的专有数据注册为声卡的一个低阶设备
 	//注册为低阶设备主要是为了当声卡被注销时，芯片专用数据所占用的内存可以被自动地释放。
-	snd_device_new(card, SNDRV_DEV_LOWLEVEL, chip, &ops);  
+	snd_device_new(card, SNDRV_DEV_LOWLEVEL, chip, &mychip_dev_ops);  
 
 
 	//第三步，设置Driver的ID和名字
@@ -309,13 +329,20 @@ struct pci_driver mydriver={
 	.name = KBUILD_MODNAME,
 	.probe = mycard_audio_probe,
 	.remove = mycard_audio_remove,
+#ifdef CONFIG_PM
+	//.syspend = mycard_audio_suspend,
+	//	.resume = mycard_audio_suspend,
+#endif
 };
 
 static int __init pci_mydriver_init(void){
+	printk(KERN_EMERG "cs4624: driver init");
 	return pci_register_driver(&mydriver);
 }
 
+
 static void __init pci_mydriver_exit(void){
+	printk(KERN_EMERG "cs4624: driver exit");
 	pci_unregister_driver(&mydriver);
 }
 
