@@ -301,7 +301,7 @@ static int __devinit snd_mychip_create(struct snd_card *card, struct pci_dev *pc
 	//检查PCI是否可用，设置28bit DMA
 	if (pci_set_dma_mask(pci, DMA_28BIT_MASK) < 0 ||
 			pci_set_consistent_dma_mask(pci,DMA_28BIT_MASK) < 0 ){
-		printk(KERN_ERR “Error to set 28bit mask DMA\n”);
+		FUNC_LOG();
  		pci_disable_device(pci);
 		return -ENXIO;
 	}
@@ -328,7 +328,7 @@ static int __devinit snd_mychip_create(struct snd_card *card, struct pci_dev *pc
 	// 分配一个中断源
 	if (request_irq(pci->irq, snd_mychip_interrupt,
 			IRQF_SHARED, “My Chip”,chip){
-		printk(KERN_ERR “Cannot grab irq %d\n”,pci->irq);
+		FUNC_LOG();
 		snd_mychip_free(chip);
 		return -EBUSY;
 	}
