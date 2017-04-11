@@ -265,7 +265,9 @@ static struct snd_device_ops mychip_dev_ops = {
 	.dev_free = snd_mychip_dev_free,
 };
 
-
+int snd_mychip_init(struct mychip *chip){
+	return 0;
+}
 static int __init mycard_audio_probe(struct pci_dev *pci){
 
 	//第一步,创建声卡设备,snd_card可以说是整个ALSA音频驱动最顶层的一个结构
@@ -294,10 +296,14 @@ static int __init mycard_audio_probe(struct pci_dev *pci){
 	chip->pci = pci;
 	//然后，把芯片的专有数据注册为声卡的一个低阶设备
 	//注册为低阶设备主要是为了当声卡被注销时，芯片专用数据所占用的内存可以被自动地释放。
+	
+	snd_mychip_init(chip);
 	if((err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, chip, &mychip_dev_ops)) < 0){
 		snd_mychip_free(chip);
 		return err;
 	} 
+
+	snd_card_set_dev(card, &pci->dev);
 
 	printk(KERN_EMERG "cs4624: mychip created, chip = %p\n", &chip);
 
@@ -315,12 +321,13 @@ static int __init mycard_audio_probe(struct pci_dev *pci){
 		return err;
 	}
 	pcm->private_data = chip;
-	strcpy(pcm->name, "CS4624");
 	chip->pcm = pcm;
+	strcpy(pcm->name, "CS4624");
+	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_mycard_playback_ops);
 	//设置DMA buffer
 	snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV,
 			snd_dma_pci_data(chip->pci), 64*1024, 256*1024);
-	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_mycard_playback_ops);
+	
 	printk(KERN_EMERG "cs4624: snd_pcm created, pcm = %p\n", &pcm);
 
 	//创建mixer control设备
