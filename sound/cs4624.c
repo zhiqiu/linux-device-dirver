@@ -344,8 +344,9 @@ static int __init mycard_audio_probe(struct pci_dev *pci){
 		snd_card_free(card);  
 		return err;  
 	}
-	printk(KERN_EMERG "cs4624: snd_card registered");
+	printk(KERN_EMERG "cs4624: snd_card registered\n");
 	pci_set_drvdata(pci, card);
+	printk(KERN_EMERG "cs4624: snd_card probe ended\n");
 }
 
 static int __init mycard_audio_remove(struct pci_dev *dev){
