@@ -263,7 +263,7 @@ struct mychip{
 	int irq;
 };
 
-static int __devexit snd_mychip_free(struct mychip *chip){
+static int __exit snd_mychip_free(struct mychip *chip){
 	if (chip->irq >= 0){
 		free_irq(chip->irq, chip);
 	}
@@ -283,7 +283,8 @@ static irqreturn_t snd_mychip_interrup(int irq, void *dev_id){
 	return IRQ_HANDLED;
 }
 
-static int __devinit snd_mychip_create(struct snd_card *card, struct pci_dev *pci, struct mychip **rchip){
+//__devinit在linux3.8以上内核中去掉了
+static int __init snd_mychip_create(struct snd_card *card, struct pci_dev *pci, struct mychip **rchip){
 	struct mychip *chip;
 	int err;
 	static struct snd_device_ops ops = {
@@ -366,7 +367,7 @@ int snd_mychip_init(struct mychip *chip){
 
 
 
-static int __devinit snd_mychip_probe(struct pci_dev *pci, const struct pci_device_id *pci_id){
+static int __init snd_mychip_probe(struct pci_dev *pci, const struct pci_device_id *pci_id){
 	
 	struct snd_card *card;
 	struct snd_pcm *pcm;
@@ -458,7 +459,7 @@ static int __devinit snd_mychip_probe(struct pci_dev *pci, const struct pci_devi
 	return 0;
 }
 
-static int __devexit mycard_audio_remove(struct pci_dev *dev){
+static int __exit mycard_audio_remove(struct pci_dev *dev){
 	struct snd_card *card = pci_get_drvdata(dev);
 	if(card){
 		snd_card_free(card);
