@@ -5,33 +5,45 @@
 #include <linux/pci.h>
 
 #include <sound/core.h>
-
 #include <sound/initval.h>
 #include <sound/control.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 
-//#define mycard cs4624
-//device ID  03:01.0 0401: 1013:6003 (rev 01) 
+// 调试打印输出
+#define CS4624_DEBUG
+#ifdef CS4624_DEBUG
+#define FUNC_LOG()  printk(KERN_EMERG "FUNC_LOG: [%d][%s()]\n", __LINE__, __FUNCTION__)
+#endif
+
+
+
+//模块信息
+#define DRIVER_NAME "cs4624"
 MODULE_AUTHOR("CHENQL");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("pci driver for cs4624 card");
 MODULE_SUPPORTED_DEVICE("{{Cirrus Logic,Sound Fusion (CS4622)},"
 		"{Cirrus Logic,Sound Fusion (CS4624)}}");
 
-static char* id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;
 
-static DEFINE_PCI_DEVICE_TABLE(snd_cs46xx_ids) = {
+static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;
+static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;
+static int enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;
+
+static DEFINE_PCI_DEVICE_TABLE(snd_mychip_ids) = {
 	{ PCI_VDEVICE(CIRRUS, 0x6001), 0, },   /* CS4280 */
 	{ PCI_VDEVICE(CIRRUS, 0x6003), 0, },   /* CS4624 */
 	{ 0, }
 };
-MODULE_DEVICE_TABLE(pci, snd_cs46xx_ids);
+MODULE_DEVICE_TABLE(pci, snd_mychip_ids);
 
 
 #define CS46XX_MIN_PERIOD_SIZE 64
 #define CS46XX_MAX_PERIOD_SIZE 1024*1024
 #define CS46XX_FRAGS 2
+
+//每个card 设备可以最多拥有4个 pcm 实例。一个pcm实例对应予一个pcm设备文件。
 //根据硬件手册定义硬件
 static struct snd_pcm_hardware snd_mycard_playback =
 {
@@ -242,16 +254,99 @@ static struct snd_kcontrol_new snd_mycard_control = {
 };
 
 
+
 struct mychip{
 	struct snd_card *card;
 	struct snd_pcm *pcm;
 	struct pci_dev *pci;
+	unsigned long port;
+	int irq;
 };
 
-static int snd_mychip_free(struct mychip *chip){
+static int __devexit snd_mychip_free(struct mychip *chip){
+	if (chip->irq >= 0){
+		free_irq(chip->irq, chip);
+	}
 
+	//释放io 和memory
+	pci_release_regions(chip->pci);
+
+	//disable PCI入口
+	pci_disable_device(chip->pci);
+
+	//释放内存
 	kfree(chip);
 }
+
+static irqreturn_t snd_mychip_interrup(int irq, void *dev_id){
+	struct mychip *chip = dev_id;
+	return IRQ_HANDLED;
+}
+
+static int __devinit snd_mychip_create(struct snd_card *card, struct pci_dev *pci, struct mychip **rchip){
+	struct mychip *chip;
+	int err;
+	static struct snd_device_ops ops = {
+		.dev_freee = snd_mychip_dev_free,
+	};
+	*rchip = NULL;
+
+	//enable pci入口
+	//在PCI 设备驱动中，在分配资源之前先要调用pci_enable_device().同样，你也要设定
+	//合适的PCI DMA mask 限制i/o接口的范围。在一些情况下，你也需要设定pci_set_master().
+	if ((err = pci_enable_device(pci)) < 0){
+		return err;
+	}
+
+	//检查PCI是否可用，设置28bit DMA
+	if (pci_set_dma_mask(pci, DMA_28BIT_MASK) < 0 ||
+			pci_set_consistent_dma_mask(pci,DMA_28BIT_MASK) < 0 ){
+		printk(KERN_ERR “Error to set 28bit mask DMA\n”);
+ 		pci_disable_device(pci);
+		return -ENXIO;
+	}
+
+	//分配内存，并初始化为0
+	chip = kzalloc(sizeof(*chip), GFP_KERNEL);
+	if (chip == NULL){
+		pci_disable_device(pci);
+		return -ENOMEM;
+	}
+
+	chip->card = card;
+	chip->pci = pci;
+	chip->irq = -1;
+
+	//(1) 初始化PCI资源
+	// I/O端口的分配
+	if ((err = pci_request_regions(pci, “My Chip”)) < 0){
+		kfree(chip);
+		pci_disable_device(pci);
+		return err;
+	}
+	chip->port = pci_resource_start(pci, 0);
+	// 分配一个中断源
+	if (request_irq(pci->irq, snd_mychip_interrupt,
+			IRQF_SHARED, “My Chip”,chip){
+		printk(KERN_ERR “Cannot grab irq %d\n”,pci->irq);
+		snd_mychip_free(chip);
+		return -EBUSY;
+	}
+	chip->irq = pci->irq;
+
+	//(2) chip hardware的初始化
+
+	//(3) 关联到card中
+	//对于大部分的组件来说，device_level已经定义好了。对于用户自定义的组件，你可以用SNDRV_DEV_LOWLEVEL
+	if ((err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, chip, &ops)) < 0) {
+		snd_mychip_free(chip);
+		return err;
+	}
+	snd_card_set_dev(card, &pci->dev);
+	*rchip = chip;
+	return 0;
+}
+
 //然后，把芯片的专有数据注册为声卡的一个低阶设备
 //注册为低阶设备主要是为了当声卡被注销时，芯片专用数据所占用的内存可以被自动地释放。
 static int snd_mychip_dev_free(struct snd_device *device)
@@ -268,67 +363,80 @@ static struct snd_device_ops mychip_dev_ops = {
 int snd_mychip_init(struct mychip *chip){
 	return 0;
 }
-static int __init mycard_audio_probe(struct pci_dev *pci){
 
-	//第一步,创建声卡设备,snd_card可以说是整个ALSA音频驱动最顶层的一个结构
-	//struct snd_card定义在include/sound/core.h中，
+
+
+static int __devinit snd_mychip_probe(struct pci_dev *pci, const struct pci_device_id *pci_id){
+	
 	struct snd_card *card;
 	struct snd_pcm *pcm;
 	struct mychip *chip;
-
 	int err;
+
+	static int dev;
+	//(1) 检查设备索引
+	if (dev >= SNDRV_CARDS)
+		return -ENODEV;
+	if (!enable[dev]) {
+		dev ++;
+		return -ENOENT;
+	}
+
+	//(2) 创建声卡设备实例
+	//snd_card可以说是整个ALSA音频驱动最顶层的一个结构
+	//struct snd_card定义在include/sound/core.h中，
 	//snd_card_new(linux 2.6.22以上被snd_card_create代替)
-	err = snd_card_create(SNDRV_DEFAULT_IDX1, SNDRV_DEFAULT_STR1, THIS_MODULE, 0, &card);
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE, 0, &card);
 	if(err < 0){
+		return err;
+	}
+
+	FUNC_LOG();
+
+	//(3) 创建声卡芯片专用的资源组件
+	// 声明为mychip，例如中断资源、io资源、dma资源等。
+	if ((err = snd_mychip_create(card, pci, &chip)) < 0){
 		snd_card_free(card);
 		return err;
 	}
-	printk(KERN_EMERG "cs4624: snd_card created, card = %p\n", &card);
-	//第二步，创建声卡芯片专用的资源，例如中断资源、io资源、dma资源等。
-
-
-
-	chip = kzalloc(sizeof(struct mychip), GFP_KERNEL);  //kzalloc会自动初始为0，相当于kmalloc+memset
 	chip->card = card;
 	/* enable PCI device */
-	if ((err = pci_enable_device(pci)) < 0)
+
+	if ((err = pci_enable_device(pci)) < 0){
 		return err;
+	}
 	chip->pci = pci;
 	//然后，把芯片的专有数据注册为声卡的一个低阶设备
 	//注册为低阶设备主要是为了当声卡被注销时，芯片专用数据所占用的内存可以被自动地释放。
 	
 	snd_mychip_init(chip);
-	if((err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, chip, &mychip_dev_ops)) < 0){
-		snd_mychip_free(chip);
+
+	FUNC_LOG();
+
+	//(4)，设置Driver的ID和名字
+	//驱动的一些结构变量保存chip 的ID字串。它会在alsa-lib 配置的时候使用，所以要保证他的唯一和简单。
+	//甚至一些相同的驱动可以拥有不同的 ID,可以区别每种chip类型的各种功能。
+	//shortname域是一个更详细的名字。longname域将会在/proc/asound/cards中显示。
+	strcpy(card->driver,"My Chip");
+	strcpy(card->shortname,"My Own Chip 123");
+	sprintf(card->longname,"%s at 0x%1x irq %i",
+		card->shortname, chip->ioport, chip->irq);
+
+	//(5)，创建声卡的功能部件（逻辑设备），例如PCM，Mixer，MIDI等
+	//创建pcm设备
+	err = snd_pcm_new(card, "mycard_pcm", 0, 1, 0, &pcm);
+	if(err < 0){
+		snd_card_free(card);
 		return err;
-	} 
-
-	snd_card_set_dev(card, &pci->dev);
-
-	printk(KERN_EMERG "cs4624: mychip created, chip = %p\n", &chip);
-
-	//第三步，设置Driver的ID和名字
-	strcpy(card->driver, "My Chip");  
-	strcpy(card->shortname, "My Own Chip 123");  
-	//sprintf(card->longname, "%s at 0x%lx irq %i",  
-	//            card->shortname, chip->ioport, chip->irq); 
-
-	// 第四步，创建声卡的功能部件（逻辑设备），例如PCM，Mixer，MIDI等
-	// 创建pcm设备
-	//err = snd_pcm_new(card, "mycard_pcm", 0, 1, 0, &pcm);
-	//if(err < 0){
-	//	snd_card_free(card);
-	//	return err;
-	//}
-	//pcm->private_data = chip;
-	//chip->pcm = pcm;
-	//strcpy(pcm->name, "CS4624");
-	//snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_mycard_playback_ops);
-	//设置DMA buffer
-	//snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV,
+	}
+	pcm->private_data = chip;
+	chip->pcm = pcm;
+	strcpy(pcm->name, "CS4624");
+	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_mycard_playback_ops);
+	设置DMA buffer
+	snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV,
 			snd_dma_pci_data(chip->pci), 64*1024, 256*1024);
-	
-	//printk(KERN_EMERG "cs4624: snd_pcm created, pcm = %p\n", &pcm);
+
 
 	//创建mixer control设备
 	err = snd_ctl_add(card, snd_ctl_new1(&snd_mycard_control, chip));  
@@ -338,15 +446,16 @@ static int __init mycard_audio_probe(struct pci_dev *pci){
 	}
 	printk(KERN_EMERG "cs4624: snd_control created, control = %p", &pcm);
 
-	//第五步，注册声卡
-	err = snd_card_register(card);  
-	if (err < 0) {  
+	//(6) 注册card实例
+	if((err = snd_card_register(card)) < 0){
 		snd_card_free(card);  
 		return err;  
 	}
-	printk(KERN_EMERG "cs4624: snd_card registered\n");
+
+	//(7) 设定PCI驱动数据
 	pci_set_drvdata(pci, card);
-	printk(KERN_EMERG "cs4624: snd_card probe ended\n");
+	dev ++;
+	return 0;
 }
 
 static int __init mycard_audio_remove(struct pci_dev *dev){
@@ -360,23 +469,23 @@ static int __init mycard_audio_remove(struct pci_dev *dev){
 
 struct pci_driver mydriver={
 	.name = KBUILD_MODNAME,
-	.id_table = snd_cs46xx_ids,
-	.probe = mycard_audio_probe,
+	.id_table = snd_mychip_ids,
+	.probe = snd_mychip_probe,
 	.remove = mycard_audio_remove,
 #ifdef CONFIG_PM
 	//.syspend = mycard_audio_suspend,
-	//	.resume = mycard_audio_suspend,
+	//.resume = mycard_audio_suspend,
 #endif
 };
 
 static int __init pci_mydriver_init(void){
-	printk(KERN_EMERG "cs4624: driver init");
+	FUNC_LOG();
 	return pci_register_driver(&mydriver);
 }
 
 
 static void __init pci_mydriver_exit(void){
-	printk(KERN_EMERG "cs4624: driver exit");
+	FUNC_LOG();
 	pci_unregister_driver(&mydriver);
 }
 
