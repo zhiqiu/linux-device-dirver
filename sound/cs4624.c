@@ -458,7 +458,7 @@ static int __devinit snd_mychip_probe(struct pci_dev *pci, const struct pci_devi
 	return 0;
 }
 
-static int __init mycard_audio_remove(struct pci_dev *dev){
+static int __devexit mycard_audio_remove(struct pci_dev *dev){
 	struct snd_card *card = pci_get_drvdata(dev);
 	if(card){
 		snd_card_free(card);
