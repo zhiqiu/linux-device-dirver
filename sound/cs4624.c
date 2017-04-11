@@ -3,7 +3,7 @@
 
 #include <linux/module.h>
 #include <linux/pci.h>
-
+#include <linux/init.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/control.h>
@@ -423,28 +423,28 @@ static int __devinit snd_mychip_probe(struct pci_dev *pci, const struct pci_devi
 		card->shortname, chip->ioport, chip->irq);
 
 	//(5)，创建声卡的功能部件（逻辑设备），例如PCM，Mixer，MIDI等
-	//创建pcm设备
-	err = snd_pcm_new(card, "mycard_pcm", 0, 1, 0, &pcm);
-	if(err < 0){
-		snd_card_free(card);
-		return err;
-	}
-	pcm->private_data = chip;
-	chip->pcm = pcm;
-	strcpy(pcm->name, "CS4624");
-	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_mycard_playback_ops);
-	设置DMA buffer
-	snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV,
-			snd_dma_pci_data(chip->pci), 64*1024, 256*1024);
+	// //创建pcm设备
+	// err = snd_pcm_new(card, "mycard_pcm", 0, 1, 0, &pcm);
+	// if(err < 0){
+	// 	snd_card_free(card);
+	// 	return err;
+	// }
+	// pcm->private_data = chip;
+	// chip->pcm = pcm;
+	// strcpy(pcm->name, "CS4624");
+	// snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_mycard_playback_ops);
+	// //设置DMA buffer
+	// snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV,
+	// 		snd_dma_pci_data(chip->pci), 64*1024, 256*1024);
 
 
-	//创建mixer control设备
-	err = snd_ctl_add(card, snd_ctl_new1(&snd_mycard_control, chip));  
-	if (err < 0){
-		snd_card_free(card);
-		return err;
-	}
-	printk(KERN_EMERG "cs4624: snd_control created, control = %p", &pcm);
+	// //创建mixer control设备
+	// err = snd_ctl_add(card, snd_ctl_new1(&snd_mycard_control, chip));  
+	// if (err < 0){
+	// 	snd_card_free(card);
+	// 	return err;
+	// }
+	// printk(KERN_EMERG "cs4624: snd_control created, control = %p", &pcm);
 
 	//(6) 注册card实例
 	if((err = snd_card_register(card)) < 0){
