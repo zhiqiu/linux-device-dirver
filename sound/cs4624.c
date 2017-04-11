@@ -319,7 +319,7 @@ static int __devinit snd_mychip_create(struct snd_card *card, struct pci_dev *pc
 
 	//(1) 初始化PCI资源
 	// I/O端口的分配
-	if ((err = pci_request_regions(pci, “My Chip”)) < 0){
+	if ((err = pci_request_regions(pci, "My Chip")) < 0){
 		kfree(chip);
 		pci_disable_device(pci);
 		return err;
@@ -327,7 +327,7 @@ static int __devinit snd_mychip_create(struct snd_card *card, struct pci_dev *pc
 	chip->port = pci_resource_start(pci, 0);
 	// 分配一个中断源
 	if (request_irq(pci->irq, snd_mychip_interrupt,
-			IRQF_SHARED, “My Chip”,chip){
+			IRQF_SHARED, "My Chip",chip){
 		FUNC_LOG();
 		snd_mychip_free(chip);
 		return -EBUSY;
