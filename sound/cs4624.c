@@ -2,6 +2,7 @@
 //参考http://blog.csdn.net/droidphone
 
 #include <linux/module.h>
+#include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <linux/init.h>
 #include <sound/core.h>
@@ -278,7 +279,14 @@ static int __exit snd_mychip_free(struct mychip *chip){
 	kfree(chip);
 }
 
-static irqreturn_t snd_mychip_interrup(int irq, void *dev_id){
+static int snd_mychip_dev_free(struct snd_device *device)
+{
+	struct mychip *chip = device->device_data;
+
+	return snd_mychip_free(chip);
+}
+
+static irqreturn_t snd_mychip_interrupt(int irq, void *dev_id){
 	struct mychip *chip = dev_id;
 	return IRQ_HANDLED;
 }
@@ -288,7 +296,7 @@ static int __init snd_mychip_create(struct snd_card *card, struct pci_dev *pci, 
 	struct mychip *chip;
 	int err;
 	static struct snd_device_ops ops = {
-		.dev_freee = snd_mychip_dev_free,
+		.dev_free = snd_mychip_dev_free,
 	};
 	*rchip = NULL;
 
@@ -300,8 +308,9 @@ static int __init snd_mychip_create(struct snd_card *card, struct pci_dev *pci, 
 	}
 
 	//检查PCI是否可用，设置28bit DMA
-	if (pci_set_dma_mask(pci, DMA_28BIT_MASK) < 0 ||
-			pci_set_consistent_dma_mask(pci,DMA_28BIT_MASK) < 0 ){
+	// DMA_BIT_MASK(28)  代替 DMA_28BIT_MASK
+	if (pci_set_dma_mask(pci, DMA_BIT_MASK(28)) < 0 ||
+			pci_set_consistent_dma_mask(pci,DMA_BIT_MASK(28)) < 0 ){
 		FUNC_LOG();
  		pci_disable_device(pci);
 		return -ENXIO;
@@ -327,8 +336,7 @@ static int __init snd_mychip_create(struct snd_card *card, struct pci_dev *pci, 
 	}
 	chip->port = pci_resource_start(pci, 0);
 	// 分配一个中断源
-	if (request_irq(pci->irq, snd_mychip_interrupt,
-			IRQF_SHARED, "My Chip",chip){
+	if (request_irq(pci->irq, snd_mychip_interrupt, IRQF_SHARED, "My Chip",chip)){
 		FUNC_LOG();
 		snd_mychip_free(chip);
 		return -EBUSY;
@@ -348,14 +356,6 @@ static int __init snd_mychip_create(struct snd_card *card, struct pci_dev *pci, 
 	return 0;
 }
 
-//然后，把芯片的专有数据注册为声卡的一个低阶设备
-//注册为低阶设备主要是为了当声卡被注销时，芯片专用数据所占用的内存可以被自动地释放。
-static int snd_mychip_dev_free(struct snd_device *device)
-{
-	struct mychip *chip = device->device_data;
-
-	return snd_mychip_free(chip);
-}
 
 static struct snd_device_ops mychip_dev_ops = {
 	.dev_free = snd_mychip_dev_free,
@@ -421,7 +421,7 @@ static int __init snd_mychip_probe(struct pci_dev *pci, const struct pci_device_
 	strcpy(card->driver,"My Chip");
 	strcpy(card->shortname,"My Own Chip 123");
 	sprintf(card->longname,"%s at 0x%1x irq %i",
-		card->shortname, chip->ioport, chip->irq);
+		card->shortname, chip->port, chip->irq);
 
 	//(5)，创建声卡的功能部件（逻辑设备），例如PCM，Mixer，MIDI等
 	// //创建pcm设备
