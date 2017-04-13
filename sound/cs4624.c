@@ -2,6 +2,7 @@
 //参考http://blog.csdn.net/droidphone
 
 #include <linux/module.h>
+#include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <linux/init.h>
@@ -10,8 +11,9 @@
 #include <sound/control.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
+#include <sound/ac97_codec.h>
 
-#include "cs4624.c"
+#include "cs4624.h"
 
 // 调试打印输出
 #define CS4624_DEBUG
@@ -68,7 +70,7 @@ static void snd_mychip_ac97_write(struct snd_ac97 *ac97, unsigned short reg, uns
 	int count;
 
 	/*
-	 *  Setup the AC97 control registers on the CS461x to send the
+	 *  Setup the AC97 control registers on the CS4624 to send the
 	 *  appropriate command to the AC97 to perform the read.
 	 *  ACCAD = Command Address Register = 46Ch
 	 *  ACCDA = Command Data Register = 470h
@@ -259,7 +261,7 @@ static int snd_mycard_playback_open(struct snd_pcm_substream *substream){
 	struct mychip_dma_stream *dma;  
 	int res;  
 
-	dma = mychip->dma_stream[0];
+	dma = &chip->dma_stream[0];
 	dma->substream = substream;
 	runtime->private_data = dma;
 
@@ -313,7 +315,7 @@ static int snd_mycard_pcm_prepare(struct snd_pcm_substream *substream){
 }
 // 当pcm开始、停止、暂停的时候都会调用trigger函数。
 // Trigger函数里面的操作应该是原子的，不要在调用这些操作时进入睡眠，trigger函数应尽量小，甚至仅仅是触发DMA。
-static int snd_mycard_playback_trigger(struct snd_pcm_substream *substream, int cmd){
+static int snd_mycard_pcm_trigger(struct snd_pcm_substream *substream, int cmd){
 
 	//struct runtime_data *prtd = substream->runtime->private_data;  
 	int res = 0;  
@@ -350,10 +352,10 @@ static struct snd_pcm_ops snd_mycard_playback_ops = {
 	.open = snd_mycard_playback_open,
 	.close = snd_mycard_playback_close,
 	.ioctl = snd_pcm_lib_ioctl,
-	.hw_params = snd_mycard_playback_hw_params,
-	.hw_free = snd_mycard_playback_hw_free,
-	.prepare = snd_mycard_playback_prepare,
-	.trigger = snd_mycard_playback_trigger,
+	.hw_params = snd_mycard_pcm_hw_params,
+	.hw_free = snd_mycard_pcm_hw_free,
+	.prepare = snd_mycard_pcm_prepare,
+	.trigger = snd_mycard_pcm_trigger,
 	//        .pointer =              snd_mycard_playback_direct_pointer,
 };
 
@@ -361,10 +363,10 @@ static struct snd_pcm_ops snd_mycard_capture_ops = {
 	.open = snd_mycard_playback_open,
 	.close = snd_mycard_playback_close,
 	.ioctl = snd_pcm_lib_ioctl,
-	.hw_params = snd_mycard_playback_hw_params,
-	.hw_free = snd_mycard_playback_hw_free,
-	.prepare = snd_mycard_playback_prepare,
-	.trigger = snd_mycard_playback_trigger,
+	.hw_params = snd_mycard_pcm_hw_params,
+	.hw_free = snd_mycard_pcm_hw_free,
+	.prepare = snd_mycard_pcm_prepare,
+	.trigger = snd_mycard_pcm_trigger,
 	//        .pointer =              snd_mycard_playback_direct_pointer,
 };
 
@@ -373,7 +375,7 @@ static struct snd_pcm_ops snd_mycard_capture_ops = {
 static int __init snd_mychip_new_pcm(struct mychip* chip){
 	struct snd_pcm *pcm;
 	int err;
-	if ((err = snd_pcm_new(chip->card, "My Chip", 0 , 1, 1,&pcm) < 0){
+	if ((err = snd_pcm_new(chip->card, "My Chip", 0 , 1, 1,&pcm)) < 0){
 		return err;
 	}
 	pcm->private_data = chip;
@@ -381,7 +383,7 @@ static int __init snd_mychip_new_pcm(struct mychip* chip){
 	chip->pcm = pcm;
 
 	// 设置操作函数
-	snd_pcm_set_ops(pcm,SNDRV_PCM_STREAM_PLAYBACK, &snd_mychip_playback_ops);
+	snd_pcm_set_ops(pcm,SNDRV_PCM_STREAM_PLAYBACK, &snd_mycard_playback_ops);
 	//snd_pcm_set_ops(pcm,SNDRV_PCM_STREAM_CAPTURE, &snd_mychip_capture_ops);
 	
 	//分配缓存
