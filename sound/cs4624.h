@@ -375,9 +375,22 @@
  */
 struct mychip_dma_stream{
 	struct snd_pcm_substream *substream;
-	int rate;
-	int stream_id;
-
+	unsigned int regDBA;		/* offset to DBA register */
+	unsigned int regDCA;		/* offset to DCA register */
+	unsigned int regDBC;		/* offset to DBC register */
+	unsigned int regDCC;		/* offset to DCC register */
+	unsigned int regDMR;		/* offset to DMR register */
+	unsigned int regDCR;		/* offset to DCR register */
+	unsigned int regHDSR;		/* offset to HDSR register */
+	unsigned int regFCR;		/* offset to FCR register */
+	unsigned int regFSIC;		/* offset to FSIC register */
+	unsigned int valDMR;		/* DMA mode */
+	unsigned int valDCR;		/* DMA command */
+	unsigned int valFCR;		/* FIFO control */
+	unsigned int fifo_offset;	/* FIFO offset within BA1 */
+	unsigned char left_slot;	/* FIFO left slot */
+	unsigned char right_slot;	/* FIFO right slot */
+	int frag;
 };
 
 struct mychip{
@@ -396,7 +409,16 @@ struct mychip{
 	unsigned long ba0_addr;
 	unsigned long ba1_addr;
 
-	struct mychip_dma_stream dma_stream[2];
+	struct mychip_dma_stream dma[4];
+
+	unsigned char src_left_play_slot;
+	unsigned char src_right_play_slot;
+	unsigned char src_left_rec_slot;
+	unsigned char src_right_rec_slot;
+
+	unsigned int spurious_dhtc_irq;
+	unsigned int spurious_dtc_irq;
+	spinlock_t reg_lock;
 };
 
 #endif
