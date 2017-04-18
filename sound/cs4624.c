@@ -386,7 +386,7 @@ static void snd_mychip_set_capture_sample_rate(struct snd_mychip *chip, unsigned
 	 *     coeffIncr = neg(dividend((Fs,out * 2^23) / Fs,in))
 	 *     phiIncr:ulOther = dividend:remainder((Fs,in * 2^26) / Fs,out)
 	 *     correctionPerGOF:correctionPerSec =
-	 * 	    dividend:remainder(ulOther / GOF_PER_SEC)
+	 *	    dividend:remainder(ulOther / GOF_PER_SEC)
 	 *     initialDelay = dividend(((24 * Fs,in) + Fs,out - 1) / Fs,out)
 	 */
 
@@ -754,18 +754,18 @@ static struct snd_pcm_ops snd_mychip_playback_ops = {
 	.trigger = snd_mychip_playback_trigger,
 	.pointer = snd_mychip_playback_direct_pointer,
 };
-/*
+
 static struct snd_pcm_ops snd_mychip_capture_ops = {
-	.open = snd_mychip_capture_open,
-	.close = snd_mychip_capture_close,
-	.ioctl = snd_pcm_lib_ioctl,
-	.hw_params = snd_mychip_capture_hw_params,
-	.hw_free = snd_mychip_capture_hw_free,
-	.prepare = snd_mychip_capture_prepare,
-	.trigger = snd_mychip_capture_trigger,
-	//        .pointer =              snd_mychip_playback_direct_pointer,
+   .open = snd_mychip_capture_open,
+   .close = snd_mychip_capture_close,
+   .ioctl = snd_pcm_lib_ioctl,
+   .hw_params = snd_mychip_capture_hw_params,
+   .hw_free = snd_mychip_capture_hw_free,
+   .prepare = snd_mychip_capture_prepare,
+   .trigger = snd_mychip_capture_trigger,
+//        .pointer =              snd_mychip_playback_direct_pointer,
 };
-*/
+ 
 
 
 static int __init snd_mychip_new_pcm(struct snd_mychip* chip){
@@ -781,7 +781,7 @@ static int __init snd_mychip_new_pcm(struct snd_mychip* chip){
 
 	// 设置操作函数
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_mychip_playback_ops);
-	//snd_pcm_set_ops(pcm,SNDRV_PCM_STREAM_CAPTURE, &snd_mychip_capture_ops);
+	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE,  &snd_mychip_capture_ops);
 
 	//分配缓存
 	snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV, snd_dma_pci_data(chip->pci), 64*1024, 256*1024);
@@ -849,20 +849,139 @@ static struct snd_kcontrol_new snd_mychip_control = {
 
 
 //---------------mychip-----------------------
+static void snd_mychip_proc_start(struct snd_mychip *chip)
+{
+	int cnt;
 
+	/*
+	 *  Set the frame timer to reflect the number of cycles per frame.
+	 */
+	snd_mychip_pokeBA1(chip, BA1_FRMT, 0xadf);
+	/*
+	 *  Turn on the run, run at frame, and DMA enable bits in the local copy of
+	 *  the SP control register.
+	 */
+	snd_mychip_pokeBA1(chip, BA1_SPCR, SPCR_RUN | SPCR_RUNFR | SPCR_DRQEN);
+	/*
+	 *  Wait until the run at frame bit resets itself in the SP control
+	 *  register.
+	 */
+	for (cnt = 0; cnt < 25; cnt++) {
+		udelay(50);
+		if (!(snd_mychip_peekBA1(chip, BA1_SPCR) & SPCR_RUNFR))
+			break;
+	}
+
+	if (snd_mychip_peekBA1(chip, BA1_SPCR) & SPCR_RUNFR)
+		snd_printk(KERN_ERR "SPCR_RUNFR never reset\n");
+}
+
+static void snd_mychip_proc_stop(struct snd_mychip *chip)
+{
+	/*
+	 *  Turn off the run, run at frame, and DMA enable bits in the local copy of
+	 *  the SP control register.
+	 */
+	snd_mychip_pokeBA1(chip, BA1_SPCR, 0);
+}
+static void snd_mychip_reset(struct snd_mychip *chip){
+	int idx;
+
+	/*
+	 *  Write the reset bit of the SP control register.
+	 */
+	snd_mychip_pokeBA1(chip, BA1_SPCR, SPCR_RSTSP);
+
+	/*
+	 *  Write the control register.
+	 */
+	snd_mychip_pokeBA1(chip, BA1_SPCR, SPCR_DRQEN);
+
+	/*
+	 *  Clear the trap registers.
+	 */
+	for (idx = 0; idx < 8; idx++) {
+		snd_mychip_pokeBA1(chip, BA1_DREG, DREG_REGID_TRAP_SELECT + idx);
+		snd_mychip_pokeBA1(chip, BA1_TWPR, 0xFFFF);
+	}
+	snd_mychip_pokeBA1(chip, BA1_DREG, 0);
+
+	/*
+	 *  Set the frame timer to reflect the number of cycles per frame.
+	 */
+	snd_mychip_pokeBA1(chip, BA1_FRMT, 0xadf);
+}
+
+/*
+ * stop the h/w
+ */
+static void snd_mychip_hw_stop(struct snd_mychip *chip)
+{
+	unsigned int tmp;
+
+	tmp = snd_mychip_peekBA1(chip, BA1_PFIE);
+	tmp &= ~0x0000f03f;
+	tmp |=  0x00000010;
+	snd_mychip_pokeBA1(chip, BA1_PFIE, tmp);	/* playback interrupt disable */
+
+	tmp = snd_mychip_peekBA1(chip, BA1_CIE);
+	tmp &= ~0x0000003f;
+	tmp |=  0x00000011;
+	snd_mychip_pokeBA1(chip, BA1_CIE, tmp);	/* capture interrupt disable */
+
+	/*
+	 *  Stop playback DMA.
+	 */
+	tmp = snd_mychip_peekBA1(chip, BA1_PCTL);
+	snd_mychip_pokeBA1(chip, BA1_PCTL, tmp & 0x0000ffff);
+
+	/*
+	 *  Stop capture DMA.
+	 */
+	tmp = snd_mychip_peekBA1(chip, BA1_CCTL);
+	snd_mychip_pokeBA1(chip, BA1_CCTL, tmp & 0xffff0000);
+
+	/*
+	 *  Reset the processor.
+	 */
+	snd_mychip_reset(chip);
+
+	snd_mychip_proc_stop(chip);
+
+	/*
+	 *  Power down the PLL.
+	 */
+	snd_mychip_pokeBA0(chip, BA0_CLKCR1, 0);
+
+	/*
+	 *  Turn off the Processor by turning off the software clock enable flag in 
+	 *  the clock control register.
+	 */
+	tmp = snd_mychip_peekBA0(chip, BA0_CLKCR1) & ~CLKCR1_SWCE;
+	snd_mychip_pokeBA0(chip, BA0_CLKCR1, tmp);
+}
 static int __exit snd_mychip_free(struct snd_mychip *chip){
+	int idx;
+	struct snd_mychip_region *region;
 	if (chip->irq >= 0){
 		free_irq(chip->irq, chip);
 	}
 
-	//释放io 和memory
-	pci_release_regions(chip->pci);
+	for (idx = 0; idx < 5; idx++) {
+		if(idx == 0) region = &chip->ba0_region.idx[0];
+		else region = &chip->ba1_region.idx[idx-1];
+		if (region->remap_addr)
+			iounmap(region->remap_addr);
+		release_and_free_resource(region->resource);
+	}
 
+	if (chip->irq >= 0)
+		free_irq(chip->irq, chip);
 	//disable PCI入口
 	pci_disable_device(chip->pci);
-
 	//释放内存
 	kfree(chip);
+	return 0;
 }
 
 static int snd_mychip_dev_free(struct snd_device *device)
@@ -908,34 +1027,6 @@ static irqreturn_t snd_mychip_interrupt(int irq, void *dev_id)
 	snd_mychip_pokeBA0(chip, BA0_HICR, HICR_CHGM | HICR_IEV);
 
 	return IRQ_HANDLED;
-}
-
-static void snd_mychip_reset(struct snd_mychip *chip){
-	int idx;
-
-	/*
-	 *  Write the reset bit of the SP control register.
-	 */
-	snd_mychip_pokeBA1(chip, BA1_SPCR, SPCR_RSTSP);
-
-	/*
-	 *  Write the control register.
-	 */
-	snd_mychip_pokeBA1(chip, BA1_SPCR, SPCR_DRQEN);
-
-	/*
-	 *  Clear the trap registers.
-	 */
-	for (idx = 0; idx < 8; idx++) {
-		snd_mychip_pokeBA1(chip, BA1_DREG, DREG_REGID_TRAP_SELECT + idx);
-		snd_mychip_pokeBA1(chip, BA1_TWPR, 0xFFFF);
-	}
-	snd_mychip_pokeBA1(chip, BA1_DREG, 0);
-
-	/*
-	 *  Set the frame timer to reflect the number of cycles per frame.
-	 */
-	snd_mychip_pokeBA1(chip, BA1_FRMT, 0xadf);
 }
 static int mychip_wait_for_fifo(struct snd_mychip * chip,int retry_timeout) {
 	u32 i, status = 0;
@@ -1211,10 +1302,10 @@ static int __init snd_mychip_create(struct snd_card *card, struct pci_dev *pci, 
 	//检查PCI是否可用，设置28bit DMA
 	// DMA_BIT_MASK(28)  代替 DMA_28BIT_MASK
 	// if (pci_set_dma_mask(pci, DMA_BIT_MASK(28)) < 0 ||
-	// 		pci_set_consistent_dma_mask(pci,DMA_BIT_MASK(28)) < 0 ){
-	// 	FUNC_LOG();
-	// 		pci_disable_device(pci);
-	// 	return -ENXIO;
+	//		pci_set_consistent_dma_mask(pci,DMA_BIT_MASK(28)) < 0 ){
+	//	FUNC_LOG();
+	//		pci_disable_device(pci);
+	//	return -ENXIO;
 	// }
 
 	//分配内存，并初始化为0
@@ -1229,24 +1320,21 @@ static int __init snd_mychip_create(struct snd_card *card, struct pci_dev *pci, 
 	chip->card = card;
 	chip->pci = pci;
 	chip->irq = -1;
-	pci_set_master(pci);
+
 
 	//(1) 初始化PCI资源
 	// I/O端口的分配
-	if ((err = pci_request_regions(pci, "My Chip")) < 0){
-		kfree(chip);
-		pci_disable_device(pci);
-		return err;
-	}
 
 	//chip->port = pci_resource_start(pci, 0);
 	chip->ba0_addr = pci_resource_start(pci, 0);
 	chip->ba1_addr = pci_resource_start(pci, 1);
-
+	pci_set_master(pci);
 
 	FUNC_LOG();
 
 	if (!chip->ba0_addr || !chip->ba1_addr) {
+		snd_printk(KERN_ERR "wrong address(es) - ba0 = 0x%lx, ba1 = 0x%lx\n",
+				chip->ba0_addr, chip->ba1_addr);
 		snd_mychip_free(chip);
 		return -ENOMEM;
 	}
@@ -1458,3 +1546,4 @@ static void __exit pci_mydriver_exit(void){
 
 module_init(pci_mydriver_init);
 module_exit(pci_mydriver_exit);
+
