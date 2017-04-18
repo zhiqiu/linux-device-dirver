@@ -1579,8 +1579,8 @@
  *
  */
 
-#define CS46XX_MODE_OUTPUT	(1<<0)	 /* MIDI UART - output */ 
-#define CS46XX_MODE_INPUT	(1<<1)	 /* MIDI UART - input */
+#define MYCHIP_MODE_OUTPUT	(1<<0)	 /* MIDI UART - output */ 
+#define MYCHIP_MODE_INPUT	(1<<1)	 /* MIDI UART - input */
 
 /*
  *
@@ -1591,17 +1591,17 @@
 
 /* maxinum number of AC97 codecs connected, AC97 2.0 defined 4 */
 #define MAX_NR_AC97				            4
-#define CS46XX_PRIMARY_CODEC_INDEX          0
-#define CS46XX_SECONDARY_CODEC_INDEX		1
-#define CS46XX_SECONDARY_CODEC_OFFSET		0x80
-#define CS46XX_DSP_CAPTURE_CHANNEL          1
+#define MYCHIP_PRIMARY_CODEC_INDEX          0
+#define MYCHIP_SECONDARY_CODEC_INDEX		1
+#define MYCHIP_SECONDARY_CODEC_OFFSET		0x80
+#define MYCHIP_DSP_CAPTURE_CHANNEL          1
 
 /* capture */
-#define CS46XX_DSP_CAPTURE_CHANNEL          1
+#define MYCHIP_DSP_CAPTURE_CHANNEL          1
 
 /* mixer */
-#define CS46XX_MIXER_SPDIF_INPUT_ELEMENT    1
-#define CS46XX_MIXER_SPDIF_OUTPUT_ELEMENT   2
+#define MYCHIP_MIXER_SPDIF_INPUT_ELEMENT    1
+#define MYCHIP_MIXER_SPDIF_OUTPUT_ELEMENT   2
 
 
 #endif

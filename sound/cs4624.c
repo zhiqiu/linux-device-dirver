@@ -9,18 +9,18 @@
 #include <sound/initval.h>
 #include <sound/control.h>
 #include <sound/pcm.h>
+#include <sound/pcm-indirect.h>
 #include <sound/pcm_params.h>
 #include <sound/ac97_codec.h>
 #include <linux/delay.h>
 
 #include "cs4624.h"
-
+#include "register.h"
 // 调试打印输出
 #define CS4624_DEBUG
 #ifdef CS4624_DEBUG
 #define FUNC_LOG()  printk(KERN_EMERG "FUNC_LOG: [%d][%s()]\n", __LINE__, __FUNCTION__)
 #endif
-
 
 
 //模块信息
@@ -44,87 +44,80 @@ static DEFINE_PCI_DEVICE_TABLE(snd_mychip_ids) = {
 MODULE_DEVICE_TABLE(pci, snd_mychip_ids);
 
 
-#define CS46XX_MIN_PERIOD_SIZE 64
-#define CS46XX_MAX_PERIOD_SIZE 1024*1024
-#define CS46XX_FRAGS 2
+/*
+ *  constants
+ */
+
+#define MYCHIP_BA0_SIZE		  0x1000
+#define MYCHIP_BA1_DATA0_SIZE 0x3000
+#define MYCHIP_BA1_DATA1_SIZE 0x3800
+#define MYCHIP_BA1_PRG_SIZE	  0x7000
+#define MYCHIP_BA1_REG_SIZE	  0x0100
+
+#define MYCHIP_MIN_PERIOD_SIZE 64
+#define MYCHIP_MAX_PERIOD_SIZE 1024*1024
+#define MYCHIP_FRAGS 2
 
 #define MYCHIP_FIFO_SIZE	32
 
 //---------------------IO-----------------
-static inline void snd_mychip_pokeBA0(struct mychip *chip, unsigned long offset, unsigned int val){
-	FUNC_LOG();
-	writel(val, chip->ba0 + offset);
+/*
+ *  common I/O routines
+ */
+static inline void snd_mychip_pokeBA1(struct snd_mychip *chip, unsigned long reg, unsigned int val){
+	unsigned int bank = reg >> 16;
+	unsigned int offset = reg & 0xffff;
+	writel(val, chip->ba1_region.idx[bank].remap_addr + offset);
 }
 
-
-static inline unsigned int snd_mychip_peekBA0(struct mychip *chip, unsigned long offset){
-	FUNC_LOG();
-        return readl(chip->ba0 + offset);
+static inline unsigned int snd_mychip_peekBA1(struct snd_mychip *chip, unsigned long reg){
+	unsigned int bank = reg >> 16;
+	unsigned int offset = reg & 0xffff;
+	return readl(chip->ba1_region.idx[bank+1].remap_addr + offset);
 }
 
-static void snd_mychip_ac97_write(struct snd_ac97 *ac97, unsigned short reg, unsigned short val){
-	/*
-	 *  1. Write ACCAD = Command Address Register = 46Ch for AC97 register address
-	 *  2. Write ACCDA = Command Data Register = 470h    for data to write to AC97
-	 *  3. Write ACCTL = Control Register = 460h for initiating the write
-	 *  4. Read ACCTL = 460h, DCV should be reset by now and 460h = 07h
-	 *  5. if DCV not cleared, break and return error
-	 */
-	struct mychip *chip = ac97->private_data;
+static inline void snd_mychip_pokeBA0(struct snd_mychip *chip, unsigned long offset, unsigned int val){
+	writel(val, chip->ba0_region.idx[0].remap_addr + offset);
+}
+
+static inline unsigned int snd_mychip_peekBA0(struct snd_mychip *chip, unsigned long offset){
+	return readl(chip->ba0_region.idx[0].remap_addr + offset);
+}
+
+static unsigned short snd_mychip_codec_read(struct snd_mychip *chip, unsigned short reg, int codec_index){
 	int count;
+	unsigned short result, tmp;
+	u32 offset = 0;
 
-	/*
-	 *  Setup the AC97 control registers on the CS4624 to send the
-	 *  appropriate command to the AC97 to perform the read.
-	 *  ACCAD = Command Address Register = 46Ch
-	 *  ACCDA = Command Data Register = 470h
-	 *  ACCTL = Control Register = 460h
-	 *  set DCV - will clear when process completed
-	 *  reset CRW - Write command
-	 *  set VFRM - valid frame enabled
-	 *  set ESYN - ASYNC generation enabled
-	 *  set RSTN - ARST# inactive, AC97 codec not reset
-         */
-	snd_mychip_pokeBA0(chip, BA0_ACCAD, reg);
-	snd_mychip_pokeBA0(chip, BA0_ACCDA, val);
-	snd_mychip_pokeBA0(chip, BA0_ACCTL, BA0_ACCTL_DCV | BA0_ACCTL_VFRM |
-				            BA0_ACCTL_ESYN | (ac97->num ? BA0_ACCTL_TC : 0));
-	for (count = 0; count < 2000; count++) {
-		/*
-		 *  First, we want to wait for a short time.
-		 */
-		udelay(10);
-		/*
-		 *  Now, check to see if the write has completed.
-		 *  ACCTL = 460h, DCV should be reset by now and 460h = 07h
-		 */
-		if (!(snd_mychip_peekBA0(chip, BA0_ACCTL) & BA0_ACCTL_DCV)) {
-			return;
-		}
-	}
-	snd_printk(KERN_ERR "AC'97 write problem, reg = 0x%x, val = 0x%x\n", reg, val);
-}
+	//	if (snd_BUG_ON(codec_index != MYCHIP_PRIMARY_CODEC_INDEX &&
+	//		       codec_index != MYCHIP_SECONDARY_CODEC_INDEX))
+	//		return -EINVAL;
 
-static unsigned short snd_mychip_ac97_read(struct snd_ac97 *ac97,
-					   unsigned short reg)
-{
-	struct mychip *chip = ac97->private_data;
-	int count;
-	unsigned short result;
-	// FIXME: volatile is necessary in the following due to a bug of
-	// some gcc versions
-	volatile int ac97_num = ((volatile struct snd_ac97 *)ac97)->num;
+	//chip->active_ctrl(chip, 1);
+
+	if (codec_index == MYCHIP_SECONDARY_CODEC_INDEX)
+		offset = MYCHIP_SECONDARY_CODEC_OFFSET;
 
 	/*
 	 *  1. Write ACCAD = Command Address Register = 46Ch for AC97 register address
 	 *  2. Write ACCDA = Command Data Register = 470h    for data to write to AC97 
-	 *  3. Write ACCTL = Control Register = 460h for initiating the write
+	 *  3. Write ACCTL = Control Register = 460h for initiating the write7---55
 	 *  4. Read ACCTL = 460h, DCV should be reset by now and 460h = 17h
 	 *  5. if DCV not cleared, break and return error
 	 *  6. Read ACSTS = Status Register = 464h, check VSTS bit
 	 */
 
-	snd_mychip_peekBA0(chip, ac97_num ? BA0_ACSDA2 : BA0_ACSDA);
+	snd_mychip_peekBA0(chip, BA0_ACSDA + offset);
+
+	tmp = snd_mychip_peekBA0(chip, BA0_ACCTL);
+	if ((tmp & ACCTL_VFRM) == 0) {
+		snd_printk(KERN_WARNING  "mychip: ACCTL_VFRM not set 0x%x\n",tmp);
+		snd_mychip_pokeBA0(chip, BA0_ACCTL, (tmp & (~ACCTL_ESYN)) | ACCTL_VFRM );
+		msleep(50);
+		tmp = snd_mychip_peekBA0(chip, BA0_ACCTL + offset);
+		snd_mychip_pokeBA0(chip, BA0_ACCTL, tmp | ACCTL_ESYN | ACCTL_VFRM );
+
+	}
 
 	/*
 	 *  Setup the AC97 control registers on the CS461x to send the
@@ -141,32 +134,41 @@ static unsigned short snd_mychip_ac97_read(struct snd_ac97 *ac97,
 
 	snd_mychip_pokeBA0(chip, BA0_ACCAD, reg);
 	snd_mychip_pokeBA0(chip, BA0_ACCDA, 0);
-	snd_mychip_pokeBA0(chip, BA0_ACCTL, BA0_ACCTL_DCV | BA0_ACCTL_CRW |
-					    BA0_ACCTL_VFRM | BA0_ACCTL_ESYN |
-			   (ac97_num ? BA0_ACCTL_TC : 0));
 
+	if (codec_index == MYCHIP_PRIMARY_CODEC_INDEX) {
+		snd_mychip_pokeBA0(chip, BA0_ACCTL,/* clear ACCTL_DCV */ ACCTL_CRW | 
+				ACCTL_VFRM | ACCTL_ESYN |
+				ACCTL_RSTN);
+		snd_mychip_pokeBA0(chip, BA0_ACCTL, ACCTL_DCV | ACCTL_CRW |
+				ACCTL_VFRM | ACCTL_ESYN |
+				ACCTL_RSTN);
+	} else {
+		snd_mychip_pokeBA0(chip, BA0_ACCTL, ACCTL_DCV | ACCTL_TC |
+				ACCTL_CRW | ACCTL_VFRM | ACCTL_ESYN |
+				ACCTL_RSTN);
+	}
 
 	/*
 	 *  Wait for the read to occur.
 	 */
-	for (count = 0; count < 500; count++) {
+	for (count = 0; count < 1000; count++) {
 		/*
 		 *  First, we want to wait for a short time.
-	 	 */
+		 */
 		udelay(10);
 		/*
 		 *  Now, check to see if the read has completed.
 		 *  ACCTL = 460h, DCV should be reset by now and 460h = 17h
 		 */
-		if (!(snd_mychip_peekBA0(chip, BA0_ACCTL) & BA0_ACCTL_DCV))
-			goto __ok1;
+		if (!(snd_mychip_peekBA0(chip, BA0_ACCTL) & ACCTL_DCV))
+			goto ok1;
 	}
 
 	snd_printk(KERN_ERR "AC'97 read problem (ACCTL_DCV), reg = 0x%x\n", reg);
 	result = 0xffff;
-	goto __end;
-	
-      __ok1:
+	goto end;
+
+ok1:
 	/*
 	 *  Wait for the valid status bit to go active.
 	 */
@@ -176,31 +178,285 @@ static unsigned short snd_mychip_ac97_read(struct snd_ac97 *ac97,
 		 *  ACSTS = Status Register = 464h
 		 *  VSTS - Valid Status
 		 */
-		if (snd_mychip_peekBA0(chip, ac97_num ? BA0_ACSTS2 : BA0_ACSTS) & BA0_ACSTS_VSTS)
-			goto __ok2;
+		if (snd_mychip_peekBA0(chip, BA0_ACSTS + offset) & ACSTS_VSTS)
+			goto ok2;
 		udelay(10);
 	}
-	
-	snd_printk(KERN_ERR "AC'97 read problem (ACSTS_VSTS), reg = 0x%x\n", reg);
-	result = 0xffff;
-	goto __end;
 
-      __ok2:
+	snd_printk(KERN_ERR "AC'97 read problem (ACSTS_VSTS), codec_index %d, reg = 0x%x\n", codec_index, reg);
+	result = 0xffff;
+	goto end;
+
+ok2:
 	/*
 	 *  Read the data returned from the AC97 register.
 	 *  ACSDA = Status Data Register = 474h
 	 */
-	result = snd_mychip_peekBA0(chip, ac97_num ? BA0_ACSDA2 : BA0_ACSDA);
+#if 0
+	printk(KERN_DEBUG "e) reg = 0x%x, val = 0x%x, BA0_ACCAD = 0x%x\n", reg,
+			snd_mychip_peekBA0(chip, BA0_ACSDA),
+			snd_mychip_peekBA0(chip, BA0_ACCAD));
+#endif
 
-      __end:
+	//snd_mychip_peekBA0(chip, BA0_ACCAD);
+	result = snd_mychip_peekBA0(chip, BA0_ACSDA + offset);
+end:
+	//chip->active_ctrl(chip, -1);
 	return result;
 }
+
+static unsigned short snd_mychip_ac97_read(struct snd_ac97 * ac97, unsigned short reg){
+	struct snd_mychip *chip = ac97->private_data;
+	unsigned short val;
+	int codec_index = ac97->num;
+
+	//	if (snd_BUG_ON(codec_index != mychip_PRIMARY_CODEC_INDEX &&
+	//		       codec_index != mychip_SECONDARY_CODEC_INDEX))
+	//		return 0xffff;
+
+	val = snd_mychip_codec_read(chip, reg, codec_index);
+
+	return val;
+}
+
+
+static void snd_mychip_codec_write(struct snd_mychip *chip, unsigned short reg, unsigned short val, int codec_index){
+	int count;
+
+	//	if (snd_BUG_ON(codec_index != mychip_PRIMARY_CODEC_INDEX &&
+	//		       codec_index != mychip_SECONDARY_CODEC_INDEX))
+	//		return;
+
+	//chip->active_ctrl(chip, 1);
+
+	/*
+	 *  1. Write ACCAD = Command Address Register = 46Ch for AC97 register address
+	 *  2. Write ACCDA = Command Data Register = 470h    for data to write to AC97
+	 *  3. Write ACCTL = Control Register = 460h for initiating the write
+	 *  4. Read ACCTL = 460h, DCV should be reset by now and 460h = 07h
+	 *  5. if DCV not cleared, break and return error
+	 */
+
+	/*
+	 *  Setup the AC97 control registers on the CS461x to send the
+	 *  appropriate command to the AC97 to perform the read.
+	 *  ACCAD = Command Address Register = 46Ch
+	 *  ACCDA = Command Data Register = 470h
+	 *  ACCTL = Control Register = 460h
+	 *  set DCV - will clear when process completed
+	 *  reset CRW - Write command
+	 *  set VFRM - valid frame enabled
+	 *  set ESYN - ASYNC generation enabled
+	 *  set RSTN - ARST# inactive, AC97 codec not reset
+	 */
+	snd_mychip_pokeBA0(chip, BA0_ACCAD , reg);
+	snd_mychip_pokeBA0(chip, BA0_ACCDA , val);
+	snd_mychip_peekBA0(chip, BA0_ACCTL);
+
+	if (codec_index == MYCHIP_PRIMARY_CODEC_INDEX) {
+		snd_mychip_pokeBA0(chip, BA0_ACCTL, /* clear ACCTL_DCV */ ACCTL_VFRM |
+				ACCTL_ESYN | ACCTL_RSTN);
+		snd_mychip_pokeBA0(chip, BA0_ACCTL, ACCTL_DCV | ACCTL_VFRM |
+				ACCTL_ESYN | ACCTL_RSTN);
+	} else {
+		snd_mychip_pokeBA0(chip, BA0_ACCTL, ACCTL_DCV | ACCTL_TC |
+				ACCTL_VFRM | ACCTL_ESYN | ACCTL_RSTN);
+	}
+
+	for (count = 0; count < 4000; count++) {
+		/*
+		 *  First, we want to wait for a short time.
+		 */
+		udelay(10);
+		/*
+		 *  Now, check to see if the write has completed.
+		 *  ACCTL = 460h, DCV should be reset by now and 460h = 07h
+		 */
+		if (!(snd_mychip_peekBA0(chip, BA0_ACCTL) & ACCTL_DCV)) {
+			goto end;
+		}
+	}
+	snd_printk(KERN_ERR "AC'97 write problem, codec_index = %d, reg = 0x%x, val = 0x%x\n", codec_index, reg, val);
+end:
+	return ;
+	//chip->active_ctrl(chip, -1);
+}
+
+static void snd_mychip_ac97_write(struct snd_ac97 *ac97, unsigned short reg, unsigned short val){
+	struct snd_mychip *chip = ac97->private_data;
+	int codec_index = ac97->num;
+
+	//	if (snd_BUG_ON(codec_index != mychip_PRIMARY_CODEC_INDEX &&
+	//		       codec_index != mychip_SECONDARY_CODEC_INDEX))
+	//		return;
+
+	snd_mychip_codec_write(chip, reg, val, codec_index);
+}
+
+//---------------------RATE---------------
+
+/*
+ *  Sample rate routines
+ */
+
+#define GOF_PER_SEC 200
+
+static void snd_mychip_set_play_sample_rate(struct snd_mychip *chip, unsigned int rate)
+{
+	unsigned long flags;
+	unsigned int tmp1, tmp2;
+	unsigned int phiIncr;
+	unsigned int correctionPerGOF, correctionPerSec;
+
+	/*
+	 *  Compute the values used to drive the actual sample rate conversion.
+	 *  The following formulas are being computed, using inline assembly
+	 *  since we need to use 64 bit arithmetic to compute the values:
+	 *
+	 *  phiIncr = floor((Fs,in * 2^26) / Fs,out)
+	 *  correctionPerGOF = floor((Fs,in * 2^26 - Fs,out * phiIncr) /
+	 *                                   GOF_PER_SEC)
+	 *  ulCorrectionPerSec = Fs,in * 2^26 - Fs,out * phiIncr -M
+	 *                       GOF_PER_SEC * correctionPerGOF
+	 *
+	 *  i.e.
+	 *
+	 *  phiIncr:other = dividend:remainder((Fs,in * 2^26) / Fs,out)
+	 *  correctionPerGOF:correctionPerSec =
+	 *      dividend:remainder(ulOther / GOF_PER_SEC)
+	 */
+	tmp1 = rate << 16;
+	phiIncr = tmp1 / 48000;
+	tmp1 -= phiIncr * 48000;
+	tmp1 <<= 10;
+	phiIncr <<= 10;
+	tmp2 = tmp1 / 48000;
+	phiIncr += tmp2;
+	tmp1 -= tmp2 * 48000;
+	correctionPerGOF = tmp1 / GOF_PER_SEC;
+	tmp1 -= correctionPerGOF * GOF_PER_SEC;
+	correctionPerSec = tmp1;
+
+	/*
+	 *  Fill in the SampleRateConverter control block.
+	 */
+	spin_lock_irqsave(&chip->reg_lock, flags);
+	snd_mychip_pokeBA1(chip, BA1_PSRC,
+			((correctionPerSec << 16) & 0xFFFF0000) | (correctionPerGOF & 0xFFFF));
+	snd_mychip_pokeBA1(chip, BA1_PPI, phiIncr);
+	spin_unlock_irqrestore(&chip->reg_lock, flags);
+}
+
+static void snd_mychip_set_capture_sample_rate(struct snd_mychip *chip, unsigned int rate)
+{
+	unsigned long flags;
+	unsigned int phiIncr, coeffIncr, tmp1, tmp2;
+	unsigned int correctionPerGOF, correctionPerSec, initialDelay;
+	unsigned int frameGroupLength, cnt;
+
+	/*
+	 *  We can only decimate by up to a factor of 1/9th the hardware rate.
+	 *  Correct the value if an attempt is made to stray outside that limit.
+	 */
+	if ((rate * 9) < 48000)
+		rate = 48000 / 9;
+
+	/*
+	 *  We can not capture at at rate greater than the Input Rate (48000).
+	 *  Return an error if an attempt is made to stray outside that limit.
+	 */
+	if (rate > 48000)
+		rate = 48000;
+
+	/*
+	 *  Compute the values used to drive the actual sample rate conversion.
+	 *  The following formulas are being computed, using inline assembly
+	 *  since we need to use 64 bit arithmetic to compute the values:
+	 *
+	 *     coeffIncr = -floor((Fs,out * 2^23) / Fs,in)
+	 *     phiIncr = floor((Fs,in * 2^26) / Fs,out)
+	 *     correctionPerGOF = floor((Fs,in * 2^26 - Fs,out * phiIncr) /
+	 *                                GOF_PER_SEC)
+	 *     correctionPerSec = Fs,in * 2^26 - Fs,out * phiIncr -
+	 *                          GOF_PER_SEC * correctionPerGOF
+	 *     initialDelay = ceil((24 * Fs,in) / Fs,out)
+	 *
+	 * i.e.
+	 *
+	 *     coeffIncr = neg(dividend((Fs,out * 2^23) / Fs,in))
+	 *     phiIncr:ulOther = dividend:remainder((Fs,in * 2^26) / Fs,out)
+	 *     correctionPerGOF:correctionPerSec =
+	 * 	    dividend:remainder(ulOther / GOF_PER_SEC)
+	 *     initialDelay = dividend(((24 * Fs,in) + Fs,out - 1) / Fs,out)
+	 */
+
+	tmp1 = rate << 16;
+	coeffIncr = tmp1 / 48000;
+	tmp1 -= coeffIncr * 48000;
+	tmp1 <<= 7;
+	coeffIncr <<= 7;
+	coeffIncr += tmp1 / 48000;
+	coeffIncr ^= 0xFFFFFFFF;
+	coeffIncr++;
+	tmp1 = 48000 << 16;
+	phiIncr = tmp1 / rate;
+	tmp1 -= phiIncr * rate;
+	tmp1 <<= 10;
+	phiIncr <<= 10;
+	tmp2 = tmp1 / rate;
+	phiIncr += tmp2;
+	tmp1 -= tmp2 * rate;
+	correctionPerGOF = tmp1 / GOF_PER_SEC;
+	tmp1 -= correctionPerGOF * GOF_PER_SEC;
+	correctionPerSec = tmp1;
+	initialDelay = ((48000 * 24) + rate - 1) / rate;
+
+	/*
+	 *  Fill in the VariDecimate control block.
+	 */
+	spin_lock_irqsave(&chip->reg_lock, flags);
+	snd_mychip_pokeBA1(chip, BA1_CSRC,
+			((correctionPerSec << 16) & 0xFFFF0000) | (correctionPerGOF & 0xFFFF));
+	snd_mychip_pokeBA1(chip, BA1_CCI, coeffIncr);
+	snd_mychip_pokeBA1(chip, BA1_CD,
+			(((BA1_VARIDEC_BUF_1 + (initialDelay << 2)) << 16) & 0xFFFF0000) | 0x80);
+	snd_mychip_pokeBA1(chip, BA1_CPI, phiIncr);
+	spin_unlock_irqrestore(&chip->reg_lock, flags);
+
+	/*
+	 *  Figure out the frame group length for the write back task.  Basically,
+	 *  this is just the factors of 24000 (2^6*3*5^3) that are not present in
+	 *  the output sample rate.
+	 */
+	frameGroupLength = 1;
+	for (cnt = 2; cnt <= 64; cnt *= 2) {
+		if (((rate / cnt) * cnt) != rate)
+			frameGroupLength *= 2;
+	}
+	if (((rate / 3) * 3) != rate) {
+		frameGroupLength *= 3;
+	}
+	for (cnt = 5; cnt <= 125; cnt *= 5) {
+		if (((rate / cnt) * cnt) != rate) 
+			frameGroupLength *= 5;
+	}
+
+	/*
+	 * Fill in the WriteBack control block.
+	 */
+	spin_lock_irqsave(&chip->reg_lock, flags);
+	snd_mychip_pokeBA1(chip, BA1_CFG1, frameGroupLength);
+	snd_mychip_pokeBA1(chip, BA1_CFG2, (0x00800000 | frameGroupLength));
+	snd_mychip_pokeBA1(chip, BA1_CCST, 0x0000FFFF);
+	snd_mychip_pokeBA1(chip, BA1_CSPB, ((65536 * rate) / 24000));
+	snd_mychip_pokeBA1(chip, (BA1_CSPB + 4), 0x0000FFFF);
+	spin_unlock_irqrestore(&chip->reg_lock, flags);
+}
+
 
 
 // --------------------PCM----------------
 //
-
-
 
 //每个card 设备可以最多拥有4个 pcm 实例。一个pcm实例对应予一个pcm设备文件。
 //根据硬件手册定义硬件
@@ -218,9 +474,9 @@ static struct snd_pcm_hardware snd_mychip_playback ={
 	.channels_min =		1,
 	.channels_max =		2,
 	.buffer_bytes_max =	(256 * 1024),
-	.period_bytes_min =	CS46XX_MIN_PERIOD_SIZE,
-	.period_bytes_max =	CS46XX_MAX_PERIOD_SIZE,
-	.periods_min =		CS46XX_FRAGS,
+	.period_bytes_min =	MYCHIP_MIN_PERIOD_SIZE,
+	.period_bytes_max =	MYCHIP_MAX_PERIOD_SIZE,
+	.periods_min =		MYCHIP_FRAGS,
 	.periods_max =		1024,
 	.fifo_size =		0,
 };
@@ -237,9 +493,9 @@ static struct snd_pcm_hardware snd_mychip_capture ={
 	.channels_min =		2,
 	.channels_max =		2,
 	.buffer_bytes_max =	(256 * 1024),
-	.period_bytes_min =	CS46XX_MIN_PERIOD_SIZE,
-	.period_bytes_max =	CS46XX_MAX_PERIOD_SIZE,
-	.periods_min =		CS46XX_FRAGS,
+	.period_bytes_min =	MYCHIP_MIN_PERIOD_SIZE,
+	.period_bytes_max =	MYCHIP_MAX_PERIOD_SIZE,
+	.periods_min =		MYCHIP_FRAGS,
 	.periods_max =		1024,
 	.fifo_size =		0,
 };
@@ -254,62 +510,143 @@ static struct snd_pcm_hw_constraint_list hw_constraints_period_sizes = {
 	.mask = 0
 };
 
-//open函数为PCM模块设定支持的传输模式、数据格式、通道数、period等参数，并为playback/capture stream分配相应的DMA通道。
-static int snd_mychip_playback_open(struct snd_pcm_substream *substream){
+static void snd_mychip_pb_trans_copy(struct snd_pcm_substream *substream, struct snd_pcm_indirect *rec, size_t bytes){
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct mychip_dma_stream * cpcm = runtime->private_data;
+	memcpy(cpcm->hw_buf.area + rec->hw_data, runtime->dma_area + rec->sw_data, bytes);
+}
 
-	struct mychip *chip = snd_pcm_substream_chip(substream);
+static int snd_mychip_playback_transfer(struct snd_pcm_substream *substream)
+{
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct mychip_dma_stream * cpcm = runtime->private_data;
+	snd_pcm_indirect_playback_transfer(substream, &cpcm->pcm_rec, snd_mychip_pb_trans_copy);
+	return 0;
+}
+
+static void snd_mychip_cp_trans_copy(struct snd_pcm_substream *substream,
+		struct snd_pcm_indirect *rec, size_t bytes)
+{
+	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	memcpy(runtime->dma_area + rec->sw_data,
+			chip->capt->hw_buf.area + rec->hw_data, bytes);
+}
+
+static int snd_mychip_capture_transfer(struct snd_pcm_substream *substream)
+{
+	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
+	snd_pcm_indirect_capture_transfer(substream, &chip->capt->pcm_rec, snd_mychip_cp_trans_copy);
+	return 0;
+}
+static int snd_mychip_playback_open_channel(struct snd_pcm_substream *substream, int pcm_channel_id){
+	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
 	// snd_pcm_runtime是pcm运行时的信息。
 	// 当打开一个pcm子流时，pcm运行时实例就会分配给这个子流。
 	// 它拥有很多信息：hw_params和sw_params配置拷贝，缓冲区指针，mmap记录，自旋锁等。snd_pcm_runtime对于驱动程序操作集函数是只读的，仅pcm中间层可以改变或更新这些信息。
 	struct snd_pcm_runtime *runtime = substream->runtime;  
-	struct mychip_dma_stream *dma;  
-	int res;  
+	struct mychip_dma_stream *dma; 
 
-	dma = &chip->dma[0];
+	// 分配dma内存空间，设置chip->play = dma
+	dma = kzalloc(sizeof(*dma), GFP_KERNEL);
+	if(dma == NULL){
+		return -ENOMEM;
+	}
+	if (snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV, snd_dma_pci_data(chip->pci),
+				PAGE_SIZE, &dma->hw_buf) < 0) {
+		kfree(dma);
+		return -ENOMEM;
+	}
 	dma->substream = substream;
-	
+	//dma->pcm_channel = NULL; 
+	//dma->pcm_channel_id = pcm_channel_id;
+
+	chip->play = dma;
+
+
 	//设定runtime硬件参数  
 	runtime->private_data = dma;	
 	runtime->hw = snd_mychip_playback;
+	//runtime->private_free = snd_mychip_pcm_free_substream;
 
 	/* Ensure that buffer size is a multiple of period size */  
-	res = snd_pcm_hw_constraint_list(runtime, 0,
+	snd_pcm_hw_constraint_list(runtime, 0,
 			SNDRV_PCM_HW_PARAM_PERIOD_BYTES, 
 			&hw_constraints_period_sizes);
 
-	return res;  
+	return 0;  
+}
+
+static struct snd_pcm_ops snd_mychip_playback_ops;
+//open函数为PCM模块设定支持的传输模式、数据格式、通道数、period等参数，并为playback/capture stream分配相应的DMA通道。
+static int snd_mychip_playback_open(struct snd_pcm_substream *substream){
+	snd_printdd("open front channel\n");
+	return snd_mychip_playback_open_channel(substream, DSP_PCM_MAIN_CHANNEL);
 }
 
 //close函数，停止dma，释放数据
 static int snd_mychip_playback_close(struct snd_pcm_substream *substream){
-	//struct mychip *chip = snd_pcm_substream_chip(substream);
+	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
 	struct mychip_dma_stream *dma = substream->runtime->private_data;
+	chip->play = NULL;
 	dma->substream = NULL;
+	snd_dma_free_pages(&dma->hw_buf);
 	return 0;  
 }
 
 //hw_params函数为substream（每打开一个playback或capture，ALSA core均产生相应的一个substream）设定DMA的源（目的）地址，以及DMA缓冲区的大小。
-static int snd_mychip_pcm_hw_params(struct snd_pcm_substream *substream, struct snd_pcm_hw_params *hw_params){
+static int snd_mychip_playback_hw_params(struct snd_pcm_substream *substream, struct snd_pcm_hw_params *hw_params){
 	int err;
-	err = snd_pcm_lib_malloc_pages(substream, params_buffer_bytes(hw_params));
-	return err;  
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct mychip_dma_stream *dma = runtime->private_data;
+
+	if (params_periods(hw_params) == MYCHIP_FRAGS) {
+		if (runtime->dma_area != dma->hw_buf.area)
+			snd_pcm_lib_free_pages(substream);
+		runtime->dma_area = dma->hw_buf.area;
+		runtime->dma_addr = dma->hw_buf.addr;
+		runtime->dma_bytes = dma->hw_buf.bytes;
+		substream->ops = &snd_mychip_playback_ops;
+	}else {
+		if (runtime->dma_area == dma->hw_buf.area) {
+			runtime->dma_area = NULL;
+			runtime->dma_addr = 0;
+			runtime->dma_bytes = 0;
+		}
+		if ((err = snd_pcm_lib_malloc_pages(substream, params_buffer_bytes(hw_params))) < 0) {
+			return err;
+		}
+		substream->ops = &snd_mychip_playback_ops;
+	}
+
+	return 0;  
 }
 
 //hw_params函数为substream（每打开一个playback或capture，ALSA core均产生相应的一个substream）设定DMA的源（目的）地址，以及DMA缓冲区的大小。
-static int snd_mychip_pcm_hw_free(struct snd_pcm_substream *substream){
-	int err;
-	err = snd_pcm_lib_free_pages(substream);
-	return err;  
+static int snd_mychip_playback_hw_free(struct snd_pcm_substream *substream){
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct mychip_dma_stream *dma = runtime->private_data;
+
+	if (runtime->dma_area != dma->hw_buf.area)
+		snd_pcm_lib_free_pages(substream);
+
+	runtime->dma_area = NULL;
+	runtime->dma_addr = 0;
+	runtime->dma_bytes = 0;
+	return 0;  
 }
 
 // 当pcm“准备好了”调用该函数。在这里根据channels、buffer_bytes等来设定DMA传输参数()，跟具体硬件平台相关。
 // 注：每次调用snd_pcm_prepare()的时候均会调用prepare函数。
-static int snd_mychip_pcm_prepare(struct snd_pcm_substream *substream){
-	struct mychip *chip = snd_pcm_substream_chip(substream);
+static int snd_mychip_playback_prepare(struct snd_pcm_substream *substream){
+	unsigned int tmp;
+	unsigned int pfie;
+	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
 	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct mychip_dma_stream *dma = runtime->private_data;
 	/*在此做设定一些硬件配置
-	*例如....
-	*/
+	 *例如....
+	 */
 	//mychip_set_sample_format(chip, runtime->format);
 	//mychip_set_sample_rate(chip, runtime->rate);
 	//mychip_set_channels(chip, runtime->channels);
@@ -317,29 +654,71 @@ static int snd_mychip_pcm_prepare(struct snd_pcm_substream *substream){
 	//chip->buffer_size,
 	//chip->period_size);
 
+	pfie = snd_mychip_peekBA1(chip, BA1_PFIE);
+	pfie &= ~0x0000f03f;
+	dma->shift = 2;
+	/* if to convert from stereo to mono */
+	if (runtime->channels == 1) {
+		dma->shift--;
+		pfie |= 0x00002000;
+	}
+	/* if to convert from 8 bit to 16 bit */
+	if (snd_pcm_format_width(runtime->format) == 8) {
+		dma->shift--;
+		pfie |= 0x00001000;
+	}
+	/* if to convert to unsigned */
+	if (snd_pcm_format_unsigned(runtime->format))
+		pfie |= 0x00008000;
+
+	/* Never convert byte order when sample stream is 8 bit */
+	if (snd_pcm_format_width(runtime->format) != 8) {
+		/* convert from big endian to little endian */
+		if (snd_pcm_format_big_endian(runtime->format))
+			pfie |= 0x00004000;
+	}
+
+	memset(&dma->pcm_rec, 0, sizeof(dma->pcm_rec));
+	dma->pcm_rec.sw_buffer_size = snd_pcm_lib_buffer_bytes(substream);
+	dma->pcm_rec.hw_buffer_size = runtime->period_size * MYCHIP_FRAGS << dma->shift;
+
+	snd_mychip_pokeBA1(chip, BA1_PBA, dma->hw_buf.addr);
+	tmp = snd_mychip_peekBA1(chip, BA1_PDTC);
+	tmp &= ~0x000003ff;
+	tmp |= (4 << dma->shift) - 1;
+	snd_mychip_pokeBA1(chip, BA1_PDTC, tmp);
+	snd_mychip_pokeBA1(chip, BA1_PFIE, pfie);
+	snd_mychip_set_play_sample_rate(chip, runtime->rate);
+
 	return 0;  
 }
 // 当pcm开始、停止、暂停的时候都会调用trigger函数。
 // Trigger函数里面的操作应该是原子的，不要在调用这些操作时进入睡眠，trigger函数应尽量小，甚至仅仅是触发DMA。
-static int snd_mychip_pcm_trigger(struct snd_pcm_substream *substream, int cmd){
+static int snd_mychip_playback_trigger(struct snd_pcm_substream *substream, int cmd){
 
 	struct mychip_dma_stream *dma = substream->runtime->private_data;
-	struct mychip *chip = snd_pcm_substream_chip(substream);
+	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
 	int res = 0;  
-
+	unsigned int tmp;
 	spin_lock(&chip->reg_lock);  
 
 	switch (cmd) {  
 		case SNDRV_PCM_TRIGGER_START:  
 		case SNDRV_PCM_TRIGGER_RESUME:  
-		case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:  
-			//prtd->state |= ST_RUNNING;  
-			//dma_ctrl(prtd->params->channel, DMAOP_START); //DMA开启  
+			if (substream->runtime->periods != MYCHIP_FRAGS)
+				snd_mychip_playback_transfer(substream);
+			tmp = snd_mychip_peekBA1(chip, BA1_PCTL);
+			tmp &= 0x0000ffff;
+
+			//snd_mychip_pokeBA1(chip, BA1_PCTL, chip->play_ctl | tmp);
+			snd_mychip_pokeBA1(chip, BA1_PCTL, chip->play->ctl | tmp);
 			break;  
 
 		case SNDRV_PCM_TRIGGER_STOP:  
 		case SNDRV_PCM_TRIGGER_SUSPEND:  
-		case SNDRV_PCM_TRIGGER_PAUSE_PUSH:  
+			tmp = snd_mychip_peekBA1(chip, BA1_PCTL);
+			tmp &= 0x0000ffff;
+			snd_mychip_pokeBA1(chip, BA1_PCTL, tmp);
 			//prtd->state &= ~ST_RUNNING;  
 			//dma_ctrl(prtd->params->channel, DMAOP_STOP); //DMA停止  
 			break;  
@@ -355,34 +734,45 @@ static int snd_mychip_pcm_trigger(struct snd_pcm_substream *substream, int cmd){
 
 }
 
+static snd_pcm_uframes_t snd_mychip_playback_direct_pointer(struct snd_pcm_substream *substream){
+	struct mychip_dma_stream *dma = substream->runtime->private_data;
+	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
+
+	size_t ptr;
+	ptr = snd_mychip_peekBA1(chip, BA1_PBA);
+	ptr -= dma->hw_buf.addr;
+	return ptr >> dma->shift;
+}
+
 static struct snd_pcm_ops snd_mychip_playback_ops = {
 	.open = snd_mychip_playback_open,
 	.close = snd_mychip_playback_close,
 	.ioctl = snd_pcm_lib_ioctl,
-	.hw_params = snd_mychip_pcm_hw_params,
-	.hw_free = snd_mychip_pcm_hw_free,
-	.prepare = snd_mychip_pcm_prepare,
-	.trigger = snd_mychip_pcm_trigger,
-	//        .pointer =              snd_mychip_playback_direct_pointer,
+	.hw_params = snd_mychip_playback_hw_params,
+	.hw_free = snd_mychip_playback_hw_free,
+	.prepare = snd_mychip_playback_prepare,
+	.trigger = snd_mychip_playback_trigger,
+	.pointer = snd_mychip_playback_direct_pointer,
 };
-
+/*
 static struct snd_pcm_ops snd_mychip_capture_ops = {
-	.open = snd_mychip_playback_open,
-	.close = snd_mychip_playback_close,
+	.open = snd_mychip_capture_open,
+	.close = snd_mychip_capture_close,
 	.ioctl = snd_pcm_lib_ioctl,
-	.hw_params = snd_mychip_pcm_hw_params,
-	.hw_free = snd_mychip_pcm_hw_free,
-	.prepare = snd_mychip_pcm_prepare,
-	.trigger = snd_mychip_pcm_trigger,
+	.hw_params = snd_mychip_capture_hw_params,
+	.hw_free = snd_mychip_capture_hw_free,
+	.prepare = snd_mychip_capture_prepare,
+	.trigger = snd_mychip_capture_trigger,
 	//        .pointer =              snd_mychip_playback_direct_pointer,
 };
+*/
 
 
-
-static int __init snd_mychip_new_pcm(struct mychip* chip){
+static int __init snd_mychip_new_pcm(struct snd_mychip* chip){
 	struct snd_pcm *pcm;
 	int err;
-	if ((err = snd_pcm_new(chip->card, "My Chip", 0 , 1, 1,&pcm) < 0)){
+	//    int snd_pcm_new(struct snd_card *card, const char *id, int device, int playback_count, int capture_count, struct snd_pcm ** rpcm);
+	if ((err = snd_pcm_new(chip->card, "My Chip", 0 , 1, 1, &pcm) < 0)){
 		return err;
 	}
 	pcm->private_data = chip;
@@ -390,11 +780,12 @@ static int __init snd_mychip_new_pcm(struct mychip* chip){
 	chip->pcm = pcm;
 
 	// 设置操作函数
-	snd_pcm_set_ops(pcm,SNDRV_PCM_STREAM_PLAYBACK, &snd_mychip_playback_ops);
+	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_mychip_playback_ops);
 	//snd_pcm_set_ops(pcm,SNDRV_PCM_STREAM_CAPTURE, &snd_mychip_capture_ops);
-	
+
 	//分配缓存
 	snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV, snd_dma_pci_data(chip->pci), 64*1024, 256*1024);
+	return 0;
 }
 
 
@@ -459,9 +850,7 @@ static struct snd_kcontrol_new snd_mychip_control = {
 
 //---------------mychip-----------------------
 
-
-
-static int __exit snd_mychip_free(struct mychip *chip){
+static int __exit snd_mychip_free(struct snd_mychip *chip){
 	if (chip->irq >= 0){
 		free_irq(chip->irq, chip);
 	}
@@ -478,7 +867,7 @@ static int __exit snd_mychip_free(struct mychip *chip){
 
 static int snd_mychip_dev_free(struct snd_device *device)
 {
-	struct mychip *chip = device->device_data;
+	struct snd_mychip *chip = device->device_data;
 
 	return snd_mychip_free(chip);
 }
@@ -486,8 +875,8 @@ static int snd_mychip_dev_free(struct snd_device *device)
 
 static irqreturn_t snd_mychip_interrupt(int irq, void *dev_id)
 {
-	struct mychip *chip = dev_id;
-	unsigned int status, dma, val;
+	struct snd_mychip *chip = dev_id;
+	unsigned int status1, dma, val;
 	struct mychip_dma_stream *cdma;
 
 	if (chip == NULL)
@@ -497,267 +886,316 @@ static irqreturn_t snd_mychip_interrupt(int irq, void *dev_id)
 	/*
 	 *  Read the Interrupt Status Register to clear the interrupt
 	 */
-	status = snd_mychip_peekBA0(chip, BA0_HISR);
-	if ((status & 0x7fffffff) == 0) {
-		snd_mychip_pokeBA0(chip, BA0_HICR, BA0_HICR_EOI);
+	status1 = snd_mychip_peekBA0(chip, BA0_HISR);
+	if ((status1 & 0x7fffffff) == 0) {
+		snd_mychip_pokeBA0(chip, BA0_HICR, HICR_CHGM | HICR_IEV);
 		return IRQ_NONE;
 	}
-
-	if (status & (BA0_HISR_DMA(0)|BA0_HISR_DMA(1)|BA0_HISR_DMA(2)|BA0_HISR_DMA(3))) {
-		for (dma = 0; dma < 4; dma++)
-			if (status & BA0_HISR_DMA(dma)) {
-				cdma = &chip->dma[dma];
-				spin_lock(&chip->reg_lock);
-				/* ack DMA IRQ */
-				val = snd_mychip_peekBA0(chip, cdma->regHDSR);
-				/* workaround, sometimes mychip acknowledges */
-				/* end or middle transfer position twice */
-				cdma->frag++;
-				if ((val & BA0_HDSR_DHTC) && !(cdma->frag & 1)) {
-					cdma->frag--;
-					chip->spurious_dhtc_irq++;
-					spin_unlock(&chip->reg_lock);
-					continue;
-				}
-				if ((val & BA0_HDSR_DTC) && (cdma->frag & 1)) {
-					cdma->frag--;
-					chip->spurious_dtc_irq++;
-					spin_unlock(&chip->reg_lock);
-					continue;
-				}
-				spin_unlock(&chip->reg_lock);
-				snd_pcm_period_elapsed(cdma->substream);
-			}
+	/* old dsp */
+	if ((status1 & HISR_VC0) && chip->play) {
+		if (chip->play->substream)
+			snd_pcm_period_elapsed(chip->play->substream);
+	}
+	if ((status1 & HISR_VC1) && chip->pcm) {
+		if (chip->capt->substream)
+			snd_pcm_period_elapsed(chip->capt->substream);
 	}
 
 
+	// TODO midi handler 
+
 	/* EOI to the PCI part... reenables interrupts */
-	snd_mychip_pokeBA0(chip, BA0_HICR, BA0_HICR_EOI);
+	snd_mychip_pokeBA0(chip, BA0_HICR, HICR_CHGM | HICR_IEV);
 
 	return IRQ_HANDLED;
 }
 
-static int snd_mychip_init(struct mychip *chip)
-{
+static void snd_mychip_reset(struct snd_mychip *chip){
+	int idx;
+
+	/*
+	 *  Write the reset bit of the SP control register.
+	 */
+	snd_mychip_pokeBA1(chip, BA1_SPCR, SPCR_RSTSP);
+
+	/*
+	 *  Write the control register.
+	 */
+	snd_mychip_pokeBA1(chip, BA1_SPCR, SPCR_DRQEN);
+
+	/*
+	 *  Clear the trap registers.
+	 */
+	for (idx = 0; idx < 8; idx++) {
+		snd_mychip_pokeBA1(chip, BA1_DREG, DREG_REGID_TRAP_SELECT + idx);
+		snd_mychip_pokeBA1(chip, BA1_TWPR, 0xFFFF);
+	}
+	snd_mychip_pokeBA1(chip, BA1_DREG, 0);
+
+	/*
+	 *  Set the frame timer to reflect the number of cycles per frame.
+	 */
+	snd_mychip_pokeBA1(chip, BA1_FRMT, 0xadf);
+}
+static int mychip_wait_for_fifo(struct snd_mychip * chip,int retry_timeout) {
+	u32 i, status = 0;
+	/*
+	 * Make sure the previous FIFO write operation has completed.
+	 */
+	for(i = 0; i < 50; i++){
+		status = snd_mychip_peekBA0(chip, BA0_SERBST);
+
+		if( !(status & SERBST_WBSY) )
+			break;
+
+		mdelay(retry_timeout);
+	}
+
+	if(status & SERBST_WBSY) {
+		snd_printk(KERN_ERR "mychip: failure waiting for "
+				"FIFO command to complete\n");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static void snd_mychip_clear_serial_FIFOs(struct snd_mychip *chip){
+	int idx, powerdown = 0;
 	unsigned int tmp;
-	unsigned long end_time;
-	int retry_count = 2;
-
-	/* Having EPPMC.FPDN=1 prevent proper chip initialisation */
-	tmp = snd_mychip_peekBA0(chip, BA0_EPPMC);
-	if (tmp & BA0_EPPMC_FPDN)
-		snd_mychip_pokeBA0(chip, BA0_EPPMC, tmp & ~BA0_EPPMC_FPDN);
-
-      __retry:
-	tmp = snd_mychip_peekBA0(chip, BA0_CFLR);
-	if (tmp != BA0_CFLR_DEFAULT) {
-		snd_mychip_pokeBA0(chip, BA0_CFLR, BA0_CFLR_DEFAULT);
-		tmp = snd_mychip_peekBA0(chip, BA0_CFLR);
-		if (tmp != BA0_CFLR_DEFAULT) {
-			snd_printk(KERN_ERR "CFLR setup failed (0x%x)\n", tmp);
-			return -EIO;
-		}
-	}
-
-	/* Set the 'Configuration Write Protect' register
-	 * to 4281h.  Allows vendor-defined configuration
-         * space between 0e4h and 0ffh to be written. */	
-	snd_mychip_pokeBA0(chip, BA0_CWPR, 0x4281);
-	
-	if ((tmp = snd_mychip_peekBA0(chip, BA0_SERC1)) != (BA0_SERC1_SO1EN | BA0_SERC1_AC97)) {
-		snd_printk(KERN_ERR "SERC1 AC'97 check failed (0x%x)\n", tmp);
-		return -EIO;
-	}
-	if ((tmp = snd_mychip_peekBA0(chip, BA0_SERC2)) != (BA0_SERC2_SI1EN | BA0_SERC2_AC97)) {
-		snd_printk(KERN_ERR "SERC2 AC'97 check failed (0x%x)\n", tmp);
-		return -EIO;
-	}
-
-	/* Sound System Power Management */
-	snd_mychip_pokeBA0(chip, BA0_SSPM, BA0_SSPM_MIXEN | BA0_SSPM_CSRCEN |
-				           BA0_SSPM_PSRCEN | BA0_SSPM_JSEN |
-				           BA0_SSPM_ACLEN | BA0_SSPM_FMEN);
-
-	/* Serial Port Power Management */
- 	/* Blast the clock control register to zero so that the
-         * PLL starts out in a known state, and blast the master serial
-         * port control register to zero so that the serial ports also
-         * start out in a known state. */
-	snd_mychip_pokeBA0(chip, BA0_CLKCR1, 0);
-	snd_mychip_pokeBA0(chip, BA0_SERMC, 0);
-
-        /* Make ESYN go to zero to turn off
-         * the Sync pulse on the AC97 link. */
-	snd_mychip_pokeBA0(chip, BA0_ACCTL, 0);
-	udelay(50);
-                
-	/*  Drive the ARST# pin low for a minimum of 1uS (as defined in the AC97
-	 *  spec) and then drive it high.  This is done for non AC97 modes since
-	 *  there might be logic external to the mychip that uses the ARST# line
-	 *  for a reset. */
-	snd_mychip_pokeBA0(chip, BA0_SPMC, 0);
-	udelay(50);
-	snd_mychip_pokeBA0(chip, BA0_SPMC, BA0_SPMC_RSTN);
-	msleep(50);
-
-
 
 	/*
-	 *  Set the serial port timing configuration.
+	 *  See if the devices are powered down.  If so, we must power them up first
+	 *  or they will not respond.
 	 */
-	snd_mychip_pokeBA0(chip, BA0_SERMC, BA0_SERMC_TCID(1) |
-			   BA0_SERMC_PTC_AC97 | BA0_SERMC_MSPE);
+	tmp = snd_mychip_peekBA0(chip, BA0_CLKCR1);
+	if (!(tmp & CLKCR1_SWCE)) {
+		snd_mychip_pokeBA0(chip, BA0_CLKCR1, tmp | CLKCR1_SWCE);
+		powerdown = 1;
+	}
 
 	/*
-	 *  Start the DLL Clock logic.
+	 *  We want to clear out the serial port FIFOs so we don't end up playing
+	 *  whatever random garbage happens to be in them.  We fill the sample FIFOS
+	 *  with zero (silence).
 	 */
-	snd_mychip_pokeBA0(chip, BA0_CLKCR1, BA0_CLKCR1_DLLP);
-	msleep(50);
-	snd_mychip_pokeBA0(chip, BA0_CLKCR1, BA0_CLKCR1_SWCE | BA0_CLKCR1_DLLP);
+	snd_mychip_pokeBA0(chip, BA0_SERBWP, 0);
 
 	/*
-	 * Wait for the DLL ready signal from the clock logic.
+	 *  Fill all 256 sample FIFO locations.
 	 */
-	end_time = jiffies + HZ;
-	do {
+	for (idx = 0; idx < 0xFF; idx++) {
 		/*
-		 *  Read the AC97 status register to see if we've seen a CODEC
-		 *  signal from the AC97 codec.
+		 *  Make sure the previous FIFO write operation has completed.
 		 */
-		if (snd_mychip_peekBA0(chip, BA0_CLKCR1) & BA0_CLKCR1_DLLRDY)
-			goto __ok0;
-		schedule_timeout_uninterruptible(1);
-	} while (time_after_eq(end_time, jiffies));
+		if (mychip_wait_for_fifo(chip,1)) {
+			snd_printdd ("failed waiting for FIFO at addr (%02X)\n",idx);
 
-	snd_printk(KERN_ERR "DLLRDY not seen\n");
-	return -EIO;
+			if (powerdown)
+				snd_mychip_pokeBA0(chip, BA0_CLKCR1, tmp);
 
-      __ok0:
+			break;
+		}
+		/*
+		 *  Write the serial port FIFO index.
+		 */
+		snd_mychip_pokeBA0(chip, BA0_SERBAD, idx);
+		/*
+		 *  Tell the serial port to load the new value into the FIFO location.
+		 */
+		snd_mychip_pokeBA0(chip, BA0_SERBCM, SERBCM_WRC);
+	}
+	/*
+	 *  Now, if we powered up the devices, then power them back down again.
+	 *  This is kinda ugly, but should never happen.
+	 */
+	if (powerdown)
+		snd_mychip_pokeBA0(chip, BA0_CLKCR1, tmp);
+}
+
+static int snd_mychip_init(struct snd_mychip *chip){
+	int timeout;
+	/* 
+	 *  First, blast the clock control register to zero so that the PLL starts
+	 *  out in a known state, and blast the master serial port control register
+	 *  to zero so that the serial ports also start out in a known state.
+	 */
+	snd_mychip_pokeBA0(chip, BA0_CLKCR1, 0);
+	snd_mychip_pokeBA0(chip, BA0_SERMC1, 0);
+
+	/*
+	 *  If we are in AC97 mode, then we must set the part to a host controlled
+	 *  AC-link.  Otherwise, we won't be able to bring up the link.
+	 */        
+
+	snd_mychip_pokeBA0(chip, BA0_SERACC, SERACC_HSP | SERACC_CHIP_TYPE_1_03); /* 1.03 codec */
+
+
+	/*
+	 *  Drive the ARST# pin low for a minimum of 1uS (as defined in the AC97
+	 *  spec) and then drive it high.  This is done for non AC97 modes since
+	 *  there might be logic external to the CS461x that uses the ARST# line
+	 *  for a reset.
+	 */
+	snd_mychip_pokeBA0(chip, BA0_ACCTL, 0);
+
+	udelay(50);
+	snd_mychip_pokeBA0(chip, BA0_ACCTL, ACCTL_RSTN);
 
 	/*
 	 *  The first thing we do here is to enable sync generation.  As soon
 	 *  as we start receiving bit clock, we'll start producing the SYNC
 	 *  signal.
 	 */
-	snd_mychip_pokeBA0(chip, BA0_ACCTL, BA0_ACCTL_ESYN);
+	snd_mychip_pokeBA0(chip, BA0_ACCTL, ACCTL_ESYN | ACCTL_RSTN);
+
+	/*
+	 *  Now wait for a short while to allow the AC97 part to start
+	 *  generating bit clock (so we don't try to start the PLL without an
+	 *  input clock).
+	 */
+	mdelay(10);
+
+	/*
+	 *  Set the serial port timing configuration, so that
+	 *  the clock control circuit gets its clock from the correct place.
+	 */
+	snd_mychip_pokeBA0(chip, BA0_SERMC1, SERMC1_PTC_AC97);
+
+	/*
+	 *  Write the selected clock control setup to the hardware.  Do not turn on
+	 *  SWCE yet (if requested), so that the devices clocked by the output of
+	 *  PLL are not clocked until the PLL is stable.
+	 */
+	snd_mychip_pokeBA0(chip, BA0_PLLCC, PLLCC_LPF_1050_2780_KHZ | PLLCC_CDR_73_104_MHZ);
+	snd_mychip_pokeBA0(chip, BA0_PLLM, 0x3a);
+	snd_mychip_pokeBA0(chip, BA0_CLKCR2, CLKCR2_PDIVS_8);
+
+	/*
+	 *  Power up the PLL.
+	 */
+	snd_mychip_pokeBA0(chip, BA0_CLKCR1, CLKCR1_PLLP);
+
+	/*
+	 *  Wait until the PLL has stabilized.
+	 */
+	msleep(100);
+
+	/*
+	 *  Turn on clocking of the core so that we can setup the serial ports.
+	 */
+	snd_mychip_pokeBA0(chip, BA0_CLKCR1, CLKCR1_PLLP | CLKCR1_SWCE);
+
+	/*
+	 * Enable FIFO  Host Bypass
+	 */
+	snd_mychip_pokeBA0(chip, BA0_SERBCF, SERBCF_HBP);
+
+	/*
+	 *  Fill the serial port FIFOs with silence.
+	 */
+	snd_mychip_clear_serial_FIFOs(chip);
+
+	/*
+	 *  Set the serial port FIFO pointer to the first sample in the FIFO.
+	 */
+	/* snd_mychip_pokeBA0(chip, BA0_SERBSP, 0); */
+
+	/*
+	 *  Write the serial port configuration to the part.  The master
+	 *  enable bit is not set until all other values have been written.
+	 */
+	snd_mychip_pokeBA0(chip, BA0_SERC1, SERC1_SO1F_AC97 | SERC1_SO1EN);
+	snd_mychip_pokeBA0(chip, BA0_SERC2, SERC2_SI1F_AC97 | SERC1_SO1EN);
+	snd_mychip_pokeBA0(chip, BA0_SERMC1, SERMC1_PTC_AC97 | SERMC1_MSPE);
+
+	mdelay(5);
+
 
 	/*
 	 * Wait for the codec ready signal from the AC97 codec.
 	 */
-	end_time = jiffies + HZ;
-	do {
+	timeout = 150;
+	while (timeout-- > 0) {
 		/*
-		 *  Read the AC97 status register to see if we've seen a CODEC
+		 *  Read the AC97 status register to see if we've seen a CODEC READY
 		 *  signal from the AC97 codec.
 		 */
-		if (snd_mychip_peekBA0(chip, BA0_ACSTS) & BA0_ACSTS_CRDY)
-			goto __ok1;
-		schedule_timeout_uninterruptible(1);
-	} while (time_after_eq(end_time, jiffies));
+		if (snd_mychip_peekBA0(chip, BA0_ACSTS) & ACSTS_CRDY)
+			goto ok1;
+		msleep(10);
+	}
 
-	snd_printk(KERN_ERR "never read codec ready from AC'97 (0x%x)\n", snd_mychip_peekBA0(chip, BA0_ACSTS));
+
+	snd_printk(KERN_ERR "create - never read codec ready from AC'97\n");
+	snd_printk(KERN_ERR "it is not probably bug, try to use CS4236 driver\n");
 	return -EIO;
-
-      __ok1:
-
+ok1:
 
 	/*
-	 *  Assert the valid frame signal so that we can start sending commands
+	 *  Assert the vaid frame signal so that we can start sending commands
 	 *  to the AC97 codec.
 	 */
+	snd_mychip_pokeBA0(chip, BA0_ACCTL, ACCTL_VFRM | ACCTL_ESYN | ACCTL_RSTN);
 
-	snd_mychip_pokeBA0(chip, BA0_ACCTL, BA0_ACCTL_VFRM | BA0_ACCTL_ESYN);
 
 	/*
 	 *  Wait until we've sampled input slots 3 and 4 as valid, meaning that
 	 *  the codec is pumping ADC data across the AC-link.
 	 */
-
-	end_time = jiffies + HZ;
-	do {
+	timeout = 150;
+	while (timeout-- > 0) {
 		/*
-		 *  Read the input slot valid register and see if input slots 3
+		 *  Read the input slot valid register and see if input slots 3 and
 		 *  4 are valid yet.
 		 */
-                if ((snd_mychip_peekBA0(chip, BA0_ACISV) & (BA0_ACISV_SLV(3) | BA0_ACISV_SLV(4))) == (BA0_ACISV_SLV(3) | BA0_ACISV_SLV(4)))
-                        goto __ok2;
-		schedule_timeout_uninterruptible(1);
-	} while (time_after_eq(end_time, jiffies));
+		if ((snd_mychip_peekBA0(chip, BA0_ACISV) & (ACISV_ISV3 | ACISV_ISV4)) == (ACISV_ISV3 | ACISV_ISV4))
+			goto ok2;
+		msleep(10);
+	}
 
-	if (--retry_count > 0)
-		goto __retry;
-	snd_printk(KERN_ERR "never read ISV3 and ISV4 from AC'97\n");
+	/* This may happen on a cold boot with a Terratec SiXPack 5.1.
+	   Reloading the driver may help, if there's other soundcards 
+	   with the same problem I would like to know. (Benny) */
+
+	snd_printk(KERN_ERR "ERROR: snd-mychip: never read ISV3 & ISV4 from AC'97\n");
+	snd_printk(KERN_ERR "       Try reloading the ALSA driver, if you find something\n");
+	snd_printk(KERN_ERR "       broken or not working on your soundcard upon\n");
+	snd_printk(KERN_ERR "       this message please report to alsa-devel@alsa-project.org\n");
+
 	return -EIO;
 
-      __ok2:
+ok2:
 
 	/*
 	 *  Now, assert valid frame and the slot 3 and 4 valid bits.  This will
 	 *  commense the transfer of digital audio data to the AC97 codec.
 	 */
-	snd_mychip_pokeBA0(chip, BA0_ACOSV, BA0_ACOSV_SLV(3) | BA0_ACOSV_SLV(4));
+
+	snd_mychip_pokeBA0(chip, BA0_ACOSV, ACOSV_SLV3 | ACOSV_SLV4);
+
 
 	/*
-	 *  Initialize DMA structures
+	 *  Power down the DAC and ADC.  We will power them up (if) when we need
+	 *  them.
 	 */
-	for (tmp = 0; tmp < 4; tmp++) {
-		struct mychip_dma_stream *dma = &chip->dma[tmp];
-		dma->regDBA = BA0_DBA0 + (tmp * 0x10);
-		dma->regDCA = BA0_DCA0 + (tmp * 0x10);
-		dma->regDBC = BA0_DBC0 + (tmp * 0x10);
-		dma->regDCC = BA0_DCC0 + (tmp * 0x10);
-		dma->regDMR = BA0_DMR0 + (tmp * 8);
-		dma->regDCR = BA0_DCR0 + (tmp * 8);
-		dma->regHDSR = BA0_HDSR0 + (tmp * 4);
-		dma->regFCR = BA0_FCR0 + (tmp * 4);
-		dma->regFSIC = BA0_FSIC0 + (tmp * 4);
-		dma->fifo_offset = tmp * MYCHIP_FIFO_SIZE;
-		snd_mychip_pokeBA0(chip, dma->regFCR,
-				   BA0_FCR_LS(31) |
-				   BA0_FCR_RS(31) |
-				   BA0_FCR_SZ(MYCHIP_FIFO_SIZE) |
-				   BA0_FCR_OF(dma->fifo_offset));
-	}
+	/* snd_mychip_pokeBA0(chip, BA0_AC97_POWERDOWN, 0x300); */
 
-	chip->src_left_play_slot = 0;	/* AC'97 left PCM playback (3) */
-	chip->src_right_play_slot = 1;	/* AC'97 right PCM playback (4) */
-	chip->src_left_rec_slot = 10;	/* AC'97 left PCM record (3) */
-	chip->src_right_rec_slot = 11;	/* AC'97 right PCM record (4) */
-
-	/* Activate wave playback FIFO for FM playback */
-	chip->dma[0].valFCR = BA0_FCR_FEN | BA0_FCR_LS(0) |
-		              BA0_FCR_RS(1) |
- 	  	              BA0_FCR_SZ(MYCHIP_FIFO_SIZE) |
-		              BA0_FCR_OF(chip->dma[0].fifo_offset);
-	snd_mychip_pokeBA0(chip, chip->dma[0].regFCR, chip->dma[0].valFCR);
-	snd_mychip_pokeBA0(chip, BA0_SRCSA, (chip->src_left_play_slot << 0) |
-					    (chip->src_right_play_slot << 8) |
-					    (chip->src_left_rec_slot << 16) |
-					    (chip->src_right_rec_slot << 24));
-
-	/* Initialize digital volume */
-	snd_mychip_pokeBA0(chip, BA0_PPLVC, 0);
-	snd_mychip_pokeBA0(chip, BA0_PPRVC, 0);
-
-	/* Enable IRQs */
-	snd_mychip_pokeBA0(chip, BA0_HICR, BA0_HICR_EOI);
-	/* Unmask interrupts */
-	snd_mychip_pokeBA0(chip, BA0_HIMR, 0x7fffffff & ~(
-					BA0_HISR_MIDI |
-					BA0_HISR_DMAI |
-					BA0_HISR_DMA(0) |
-					BA0_HISR_DMA(1) |
-					BA0_HISR_DMA(2) |
-					BA0_HISR_DMA(3)));
-	synchronize_irq(chip->irq);
+	/*
+	 *  Turn off the Processor by turning off the software clock enable flag in 
+	 *  the clock control register.
+	 */
+	/* tmp = snd_mychip_peekBA0(chip, BA0_CLKCR1) & ~CLKCR1_SWCE; */
+	/* snd_mychip_pokeBA0(chip, BA0_CLKCR1, tmp); */
 
 	return 0;
 }
 
 //__devinit在linux3.8以上内核中去掉了,所以用__init
-static int __init snd_mychip_create(struct snd_card *card, struct pci_dev *pci, struct mychip **rchip){
-	struct mychip *chip;
-	int err;
+static int __init snd_mychip_create(struct snd_card *card, struct pci_dev *pci, struct snd_mychip **rchip){
+	struct snd_mychip *chip;
+	struct snd_mychip_region *region;
+	int err, i;
 	static struct snd_device_ops ops = {
 		.dev_free = snd_mychip_dev_free,
 	};
@@ -772,12 +1210,12 @@ static int __init snd_mychip_create(struct snd_card *card, struct pci_dev *pci, 
 
 	//检查PCI是否可用，设置28bit DMA
 	// DMA_BIT_MASK(28)  代替 DMA_28BIT_MASK
-	if (pci_set_dma_mask(pci, DMA_BIT_MASK(28)) < 0 ||
-			pci_set_consistent_dma_mask(pci,DMA_BIT_MASK(28)) < 0 ){
-		FUNC_LOG();
- 		pci_disable_device(pci);
-		return -ENXIO;
-	}
+	// if (pci_set_dma_mask(pci, DMA_BIT_MASK(28)) < 0 ||
+	// 		pci_set_consistent_dma_mask(pci,DMA_BIT_MASK(28)) < 0 ){
+	// 	FUNC_LOG();
+	// 		pci_disable_device(pci);
+	// 	return -ENXIO;
+	// }
 
 	//分配内存，并初始化为0
 	chip = kzalloc(sizeof(*chip), GFP_KERNEL);
@@ -805,25 +1243,69 @@ static int __init snd_mychip_create(struct snd_card *card, struct pci_dev *pci, 
 	chip->ba0_addr = pci_resource_start(pci, 0);
 	chip->ba1_addr = pci_resource_start(pci, 1);
 
-	chip->ba0 = pci_ioremap_bar(pci, 0);
-	chip->ba1 = pci_ioremap_bar(pci, 1);
-	
+
 	FUNC_LOG();
 
-	if (!chip->ba0 || !chip->ba1) {
+	if (!chip->ba0_addr || !chip->ba1_addr) {
 		snd_mychip_free(chip);
 		return -ENOMEM;
 	}
 
-	
-	if ((err = snd_mychip_init(chip))) {
-		FUNC_LOG();
+	region = &chip->ba0_region.name.ba0;
+	strcpy(region->name, "MYCHIP_BA0");
+	region->base = chip->ba0_addr;
+	region->size = MYCHIP_BA0_SIZE;
+	if ((region->resource = request_mem_region(region->base, region->size, region->name)) == NULL){
+		snd_printk(KERN_ERR "unable to request memory region 0x%lx-0x%lx\n", region->base, region->base + region->size - 1);
 		snd_mychip_free(chip);
-		return err;
+		return -EBUSY;
 	}
+	region->remap_addr = ioremap_nocache(region->base, region->size);
+	if (region->remap_addr == NULL) {
+		snd_printk(KERN_ERR "%s ioremap problem\n", region->name);
+		snd_mychip_free(chip);
+		return -ENOMEM;
+	}
+
+	region = &chip->ba1_region.name.data0;
+	strcpy(region->name, "MYCHIP_BA1_data0");
+	region->base = chip->ba1_addr + BA1_SP_DMEM0;
+	region->size = MYCHIP_BA1_DATA0_SIZE;
+
+	region = &chip->ba1_region.name.data1;
+	strcpy(region->name, "MYCHIP_BA1_data1");
+	region->base = chip->ba1_addr + BA1_SP_DMEM1;
+	region->size = MYCHIP_BA1_DATA1_SIZE;
+
+	region = &chip->ba1_region.name.pmem;
+	strcpy(region->name, "MYCHIP_BA1_pmem");
+	region->base = chip->ba1_addr + BA1_SP_PMEM;
+	region->size = MYCHIP_BA1_PRG_SIZE;
+
+	region = &chip->ba1_region.name.reg;
+	strcpy(region->name, "MYCHIP_BA1_reg");
+	region->base = chip->ba1_addr + BA1_SP_REG;
+	region->size = MYCHIP_BA1_REG_SIZE;
+
+	for(i = 0; i < 4; i++){
+		region = &chip->ba1_region.idx[i];
+		if ((region->resource = request_mem_region(region->base, region->size, region->name)) == NULL){
+			snd_printk(KERN_ERR "unable to request memory region 0x%lx-0x%lx\n", region->base, region->base + region->size - 1);
+			snd_mychip_free(chip);
+			return -EBUSY;
+		}
+		region->remap_addr = ioremap_nocache(region->base, region->size);
+		if (region->remap_addr == NULL) {
+			snd_printk(KERN_ERR "%s ioremap problem\n", region->name);
+			snd_mychip_free(chip);
+			return -ENOMEM;
+		}
+	}
+
 	// 分配一个中断源
 	if (request_irq(pci->irq, snd_mychip_interrupt, IRQF_SHARED, "My Chip",chip)){
 		FUNC_LOG();
+		snd_printk(KERN_ERR "unable to grab IRQ %d\n", pci->irq);
 		snd_mychip_free(chip);
 		return -EBUSY;
 	}
@@ -831,14 +1313,21 @@ static int __init snd_mychip_create(struct snd_card *card, struct pci_dev *pci, 
 
 	//(2) chip hardware的初始化
 
+	if ((err = snd_mychip_init(chip))) {
+		FUNC_LOG();
+		snd_mychip_free(chip);
+		return err;
+	}
+
 	//(3) 关联到card中
 	//对于大部分的组件来说，device_level已经定义好了。对于用户自定义的组件，你可以用SNDRV_DEV_LOWLEVEL
 	//然后，把芯片的专有数据注册为声卡的一个低阶设备
-	
+
 	if ((err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, chip, &ops)) < 0) {
 		snd_mychip_free(chip);
 		return err;
 	}
+
 	snd_card_set_dev(card, &pci->dev);
 	*rchip = chip;
 	FUNC_LOG();
@@ -854,10 +1343,10 @@ static struct snd_device_ops mychip_dev_ops = {
 
 
 static int __init snd_mychip_probe(struct pci_dev *pci, const struct pci_device_id *pci_id){
-	
+
 	struct snd_card *card;
 	struct snd_pcm *pcm;
-	struct mychip *chip;
+	struct snd_mychip *chip;
 	int err;
 
 	static int dev;
@@ -900,8 +1389,8 @@ static int __init snd_mychip_probe(struct pci_dev *pci, const struct pci_device_
 	//shortname域是一个更详细的名字。longname域将会在/proc/asound/cards中显示。
 	strcpy(card->driver,"My Chip");
 	strcpy(card->shortname,"My Own Chip 123");
-	sprintf(card->longname,"%s at 0x%1x irq %i",
-		card->shortname, chip->port, chip->irq);
+	sprintf(card->longname,"%s at 0x%1x/0x%1x irq %i",
+			card->shortname, chip->ba0_addr, chip->ba1_addr, chip->irq);
 
 	//(5)，创建声卡的功能部件（逻辑设备），例如PCM，Mixer，MIDI等
 	//创建pcm设备
