@@ -705,11 +705,12 @@ static int snd_mychip_playback_trigger(struct snd_pcm_substream *substream, int 
 	switch (cmd) {  
 		case SNDRV_PCM_TRIGGER_START:  
 		case SNDRV_PCM_TRIGGER_RESUME:  
+			FUNC_LOG();
 			if (substream->runtime->periods != MYCHIP_FRAGS)
 				snd_mychip_playback_transfer(substream);
 			tmp = snd_mychip_peekBA1(chip, BA1_PCTL);
 			tmp &= 0x0000ffff;
-
+			FUNC_LOG();
 			//snd_mychip_pokeBA1(chip, BA1_PCTL, chip->play_ctl | tmp);
 			snd_mychip_pokeBA1(chip, BA1_PCTL, chip->play->ctl | tmp);
 			break;  
@@ -744,6 +745,140 @@ static snd_pcm_uframes_t snd_mychip_playback_direct_pointer(struct snd_pcm_subst
 	return ptr >> dma->shift;
 }
 
+
+static struct snd_pcm_ops snd_mychip_capture_ops;
+//open函数为PCM模块设定支持的传输模式、数据格式、通道数、period等参数，并为playback/capture stream分配相应的DMA通道。
+static int snd_mychip_capture_open(struct snd_pcm_substream *substream){
+	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
+	if (snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV, snd_dma_pci_data(chip->pci),
+				PAGE_SIZE, &chip->capt->hw_buf) < 0)
+		return -ENOMEM;
+	chip->capt->substream = substream;
+	substream->runtime->hw = snd_mychip_capture;
+
+	//if (chip->accept_valid)
+	//	substream->runtime->hw.info |= SNDRV_PCM_INFO_MMAP_VALID;
+	return 0;
+}
+
+//close函数，停止dma，释放数据
+static int snd_mychip_capture_close(struct snd_pcm_substream *substream){
+	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
+	struct mychip_dma_stream *dma = substream->runtime->private_data;
+	chip->capt = NULL;
+	dma->substream = NULL;
+	snd_dma_free_pages(&dma->hw_buf);
+	return 0;  
+}
+
+//hw_params函数为substream（每打开一个playback或capture，ALSA core均产生相应的一个substream）设定DMA的源（目的）地址，以及DMA缓冲区的大小。
+static int snd_mychip_capture_hw_params(struct snd_pcm_substream *substream, struct snd_pcm_hw_params *hw_params){
+	int err;
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct mychip_dma_stream *dma = runtime->private_data;
+
+	if (params_periods(hw_params) == MYCHIP_FRAGS) {
+		if (runtime->dma_area != dma->hw_buf.area)
+			snd_pcm_lib_free_pages(substream);
+		runtime->dma_area = dma->hw_buf.area;
+		runtime->dma_addr = dma->hw_buf.addr;
+		runtime->dma_bytes = dma->hw_buf.bytes;
+		substream->ops = &snd_mychip_capture_ops;
+	}else {
+		if (runtime->dma_area == dma->hw_buf.area) {
+			runtime->dma_area = NULL;
+			runtime->dma_addr = 0;
+			runtime->dma_bytes = 0;
+		}
+		if ((err = snd_pcm_lib_malloc_pages(substream, params_buffer_bytes(hw_params))) < 0) {
+			return err;
+		}
+		substream->ops = &snd_mychip_capture_ops;
+	}
+
+	return 0;  
+}
+static int snd_mychip_capture_hw_free(struct snd_pcm_substream *substream){
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct mychip_dma_stream *dma = runtime->private_data;
+
+	if (runtime->dma_area != dma->hw_buf.area)
+		snd_pcm_lib_free_pages(substream);
+
+	runtime->dma_area = NULL;
+	runtime->dma_addr = 0;
+	runtime->dma_bytes = 0;
+	return 0;  
+}
+
+
+// 当pcm“准备好了”调用该函数。在这里根据channels、buffer_bytes等来设定DMA传输参数()，跟具体硬件平台相关。
+// 注：每次调用snd_pcm_prepare()的时候均会调用prepare函数。
+static int snd_mychip_capture_prepare(struct snd_pcm_substream *substream){
+	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct mychip_dma_stream *dma = runtime->private_data;
+
+	dma->shift = 2;
+
+	dma->pcm_rec.hw_buffer_size = runtime->period_size * MYCHIP_FRAGS << dma->shift;
+
+	snd_mychip_pokeBA1(chip, BA1_CBA, dma->hw_buf.addr);
+	chip->capt->shift = 2;
+	memset(&dma->pcm_rec, 0, sizeof(dma->pcm_rec));
+	dma->pcm_rec.sw_buffer_size = snd_pcm_lib_buffer_bytes(substream);
+	dma->pcm_rec.hw_buffer_size = runtime->period_size * MYCHIP_FRAGS << dma->shift;
+
+	snd_mychip_set_capture_sample_rate(chip, runtime->rate);
+
+	return 0;  
+}
+// 当pcm开始、停止、暂停的时候都会调用trigger函数。
+// Trigger函数里面的操作应该是原子的，不要在调用这些操作时进入睡眠，trigger函数应尽量小，甚至仅仅是触发DMA。
+static int snd_mychip_capture_trigger(struct snd_pcm_substream *substream, int cmd){
+
+	struct mychip_dma_stream *dma = substream->runtime->private_data;
+	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
+	int res = 0;  
+	unsigned int tmp;
+	spin_lock(&chip->reg_lock);  
+
+	switch (cmd) {  
+		case SNDRV_PCM_TRIGGER_START:  
+		case SNDRV_PCM_TRIGGER_RESUME:  
+			tmp = snd_mychip_peekBA1(chip, BA1_CCTL);
+			tmp &= 0xffff0000;
+			snd_mychip_pokeBA1(chip, BA1_CCTL, chip->capt->ctl | tmp);
+			break;  
+
+		case SNDRV_PCM_TRIGGER_STOP:  
+		case SNDRV_PCM_TRIGGER_SUSPEND:  
+			tmp = snd_mychip_peekBA1(chip, BA1_CCTL);
+			tmp &= 0xffff0000;
+			snd_mychip_pokeBA1(chip, BA1_CCTL, tmp);
+			break;  
+
+		default:  
+			res = -EINVAL;  
+			break;  
+	}  
+
+	spin_unlock(&chip->reg_lock);  
+
+	return res;  
+
+}
+
+static snd_pcm_uframes_t snd_mychip_capture_direct_pointer(struct snd_pcm_substream *substream){
+	struct mychip_dma_stream *dma = substream->runtime->private_data;
+	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
+
+	size_t ptr;
+	ptr = snd_mychip_peekBA1(chip, BA1_CBA);
+	ptr -= dma->hw_buf.addr;
+	return ptr >> dma->shift;
+}
+
 static struct snd_pcm_ops snd_mychip_playback_ops = {
 	.open = snd_mychip_playback_open,
 	.close = snd_mychip_playback_close,
@@ -756,16 +891,16 @@ static struct snd_pcm_ops snd_mychip_playback_ops = {
 };
 
 static struct snd_pcm_ops snd_mychip_capture_ops = {
-   .open = snd_mychip_capture_open,
-   .close = snd_mychip_capture_close,
-   .ioctl = snd_pcm_lib_ioctl,
-   .hw_params = snd_mychip_capture_hw_params,
-   .hw_free = snd_mychip_capture_hw_free,
-   .prepare = snd_mychip_capture_prepare,
-   .trigger = snd_mychip_capture_trigger,
-//        .pointer =              snd_mychip_playback_direct_pointer,
+	.open = snd_mychip_capture_open,
+	.close = snd_mychip_capture_close,
+	.ioctl = snd_pcm_lib_ioctl,
+	.hw_params = snd_mychip_capture_hw_params,
+	.hw_free = snd_mychip_capture_hw_free,
+	.prepare = snd_mychip_capture_prepare,
+	.trigger = snd_mychip_capture_trigger,
+	//        .pointer =              snd_mychip_playback_direct_pointer,
 };
- 
+
 
 
 static int __init snd_mychip_new_pcm(struct snd_mychip* chip){
@@ -1281,6 +1416,67 @@ ok2:
 
 	return 0;
 }
+static void snd_mychip_enable_stream_irqs(struct snd_mychip *chip)
+{
+	unsigned int tmp;
+
+	snd_mychip_pokeBA0(chip, BA0_HICR, HICR_IEV | HICR_CHGM);
+
+	tmp = snd_mychip_peekBA1(chip, BA1_PFIE);
+	tmp &= ~0x0000f03f;
+	snd_mychip_pokeBA1(chip, BA1_PFIE, tmp);	/* playback interrupt enable */
+
+	tmp = snd_mychip_peekBA1(chip, BA1_CIE);
+	tmp &= ~0x0000003f;
+	tmp |=  0x00000001;
+	snd_mychip_pokeBA1(chip, BA1_CIE, tmp);	/* capture interrupt enable */
+}
+
+int __init snd_mychip_start_dsp(struct snd_mychip *chip)
+{	
+	unsigned int tmp;
+	/*
+	 *  Reset the processor.
+	 */
+	snd_mychip_reset(chip);
+	/*
+	 *  Download the image to the processor.
+	 */
+	/* old image */
+	//if (snd_cs46xx_download_image(chip) < 0) {
+	//	snd_printk(KERN_ERR "image download error\n");
+	//	return -EIO;
+	//}
+
+	/*
+	 *  Stop playback DMA.
+	 */
+	tmp = snd_mychip_peekBA1(chip, BA1_PCTL);
+	chip->play->ctl = tmp & 0xffff0000;
+	snd_mychip_pokeBA1(chip, BA1_PCTL, tmp & 0x0000ffff);
+
+	FUNC_LOG();
+	/*
+	 *  Stop capture DMA.
+	 */
+	tmp = snd_mychip_peekBA1(chip, BA1_CCTL);
+	chip->capt->ctl = tmp & 0x0000ffff;
+	snd_mychip_pokeBA1(chip, BA1_CCTL, tmp & 0xffff0000);
+
+	mdelay(5);
+
+	snd_mychip_set_play_sample_rate(chip, 8000);
+	snd_mychip_set_capture_sample_rate(chip, 8000);
+
+	snd_mychip_proc_start(chip);
+
+	snd_mychip_enable_stream_irqs(chip);
+
+
+	return 0;
+}
+
+
 
 //__devinit在linux3.8以上内核中去掉了,所以用__init
 static int __init snd_mychip_create(struct snd_card *card, struct pci_dev *pci, struct snd_mychip **rchip){
@@ -1496,6 +1692,10 @@ static int __init snd_mychip_probe(struct pci_dev *pci, const struct pci_device_
 	}
 	printk(KERN_EMERG "cs4624: snd_control created, control = %p", &pcm);
 
+	if ((err = snd_mychip_start_dsp(chip)) < 0) {
+		snd_card_free(card);
+		return err;
+	}
 	//(6) 注册card实例
 	if((err = snd_card_register(card)) < 0){
 		snd_card_free(card);  
@@ -1547,3 +1747,5 @@ static void __exit pci_mydriver_exit(void){
 module_init(pci_mydriver_init);
 module_exit(pci_mydriver_exit);
 
+
+// TODO CAPTURE
