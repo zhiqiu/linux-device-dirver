@@ -713,7 +713,7 @@ static int snd_mychip_playback_trigger(struct snd_pcm_substream *substream, int 
 			tmp &= 0x0000ffff;
 			FUNC_LOG();
 			//snd_mychip_pokeBA1(chip, BA1_PCTL, chip->play_ctl | tmp);
-			snd_mychip_pokeBA1(chip, BA1_PCTL, chip->play->ctl | tmp);
+			snd_mychip_pokeBA1(chip, BA1_PCTL, chip->play_ctl | tmp);
 			break;  
 
 		case SNDRV_PCM_TRIGGER_STOP:  
@@ -858,7 +858,7 @@ static int snd_mychip_capture_trigger(struct snd_pcm_substream *substream, int c
 		case SNDRV_PCM_TRIGGER_RESUME:  
 			tmp = snd_mychip_peekBA1(chip, BA1_CCTL);
 			tmp &= 0xffff0000;
-			snd_mychip_pokeBA1(chip, BA1_CCTL, chip->capt->ctl | tmp);
+			snd_mychip_pokeBA1(chip, BA1_CCTL, chip->capt_ctl | tmp);
 			FUNC_LOG();
 			break;  
 
@@ -1502,7 +1502,7 @@ int __init snd_mychip_start_dsp(struct snd_mychip *chip)
 	 *  Stop playback DMA.
 	 */
 	tmp = snd_mychip_peekBA1(chip, BA1_PCTL);
-	chip->play->ctl = tmp & 0xffff0000;
+	chip->play_ctl = tmp & 0xffff0000;
 	snd_mychip_pokeBA1(chip, BA1_PCTL, tmp & 0x0000ffff);
 
 	FUNC_LOG();
@@ -1510,7 +1510,7 @@ int __init snd_mychip_start_dsp(struct snd_mychip *chip)
 	 *  Stop capture DMA.
 	 */
 	tmp = snd_mychip_peekBA1(chip, BA1_CCTL);
-	chip->capt->ctl = tmp & 0x0000ffff;
+	chip->capt_ctl = tmp & 0x0000ffff;
 	snd_mychip_pokeBA1(chip, BA1_CCTL, tmp & 0xffff0000);
 
 	mdelay(5);
