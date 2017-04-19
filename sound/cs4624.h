@@ -95,7 +95,7 @@ struct snd_mychip{
 	//struct snd_rawmidi_substream *midi_output;
 
 	struct mychip_dma_stream *capt, *play;
-	unsigned int play_ctl;
+	unsigned int play_ctl, capt_ctl;  //和*capt,*play里面的ctl一个意思，不过在初始化阶段还没有给capt,play指针分配空间，所以用局部变量暂时存储信息,start_dsp和trigger中用到
 	spinlock_t reg_lock;
 };
 

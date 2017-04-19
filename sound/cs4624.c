@@ -16,6 +16,7 @@
 
 #include "cs4624.h"
 #include "register.h"
+#include "cs4624_image.h"
 // 调试打印输出
 #define CS4624_DEBUG
 #ifdef CS4624_DEBUG
@@ -48,17 +49,17 @@ MODULE_DEVICE_TABLE(pci, snd_mychip_ids);
  *  constants
  */
 
-#define MYCHIP_BA0_SIZE		  0x1000
+#define MYCHIP_BA0_SIZE         0x1000
 #define MYCHIP_BA1_DATA0_SIZE 0x3000
 #define MYCHIP_BA1_DATA1_SIZE 0x3800
-#define MYCHIP_BA1_PRG_SIZE	  0x7000
-#define MYCHIP_BA1_REG_SIZE	  0x0100
+#define MYCHIP_BA1_PRG_SIZE     0x7000
+#define MYCHIP_BA1_REG_SIZE     0x0100
 
 #define MYCHIP_MIN_PERIOD_SIZE 64
 #define MYCHIP_MAX_PERIOD_SIZE 1024*1024
 #define MYCHIP_FRAGS 2
 
-#define MYCHIP_FIFO_SIZE	32
+#define MYCHIP_FIFO_SIZE 32
 
 //---------------------IO-----------------
 /*
@@ -73,7 +74,7 @@ static inline void snd_mychip_pokeBA1(struct snd_mychip *chip, unsigned long reg
 static inline unsigned int snd_mychip_peekBA1(struct snd_mychip *chip, unsigned long reg){
 	unsigned int bank = reg >> 16;
 	unsigned int offset = reg & 0xffff;
-	return readl(chip->ba1_region.idx[bank+1].remap_addr + offset);
+	return readl(chip->ba1_region.idx[bank].remap_addr + offset);
 }
 
 static inline void snd_mychip_pokeBA0(struct snd_mychip *chip, unsigned long offset, unsigned int val){
@@ -89,9 +90,9 @@ static unsigned short snd_mychip_codec_read(struct snd_mychip *chip, unsigned sh
 	unsigned short result, tmp;
 	u32 offset = 0;
 
-	//	if (snd_BUG_ON(codec_index != MYCHIP_PRIMARY_CODEC_INDEX &&
-	//		       codec_index != MYCHIP_SECONDARY_CODEC_INDEX))
-	//		return -EINVAL;
+	//   if (snd_BUG_ON(codec_index != MYCHIP_PRIMARY_CODEC_INDEX &&
+	//               codec_index != MYCHIP_SECONDARY_CODEC_INDEX))
+	//        return -EINVAL;
 
 	//chip->active_ctrl(chip, 1);
 
@@ -210,9 +211,9 @@ static unsigned short snd_mychip_ac97_read(struct snd_ac97 * ac97, unsigned shor
 	unsigned short val;
 	int codec_index = ac97->num;
 
-	//	if (snd_BUG_ON(codec_index != mychip_PRIMARY_CODEC_INDEX &&
-	//		       codec_index != mychip_SECONDARY_CODEC_INDEX))
-	//		return 0xffff;
+	//   if (snd_BUG_ON(codec_index != mychip_PRIMARY_CODEC_INDEX &&
+	//               codec_index != mychip_SECONDARY_CODEC_INDEX))
+	//        return 0xffff;
 
 	val = snd_mychip_codec_read(chip, reg, codec_index);
 
@@ -223,9 +224,9 @@ static unsigned short snd_mychip_ac97_read(struct snd_ac97 * ac97, unsigned shor
 static void snd_mychip_codec_write(struct snd_mychip *chip, unsigned short reg, unsigned short val, int codec_index){
 	int count;
 
-	//	if (snd_BUG_ON(codec_index != mychip_PRIMARY_CODEC_INDEX &&
-	//		       codec_index != mychip_SECONDARY_CODEC_INDEX))
-	//		return;
+	//   if (snd_BUG_ON(codec_index != mychip_PRIMARY_CODEC_INDEX &&
+	//               codec_index != mychip_SECONDARY_CODEC_INDEX))
+	//        return;
 
 	//chip->active_ctrl(chip, 1);
 
@@ -286,9 +287,9 @@ static void snd_mychip_ac97_write(struct snd_ac97 *ac97, unsigned short reg, uns
 	struct snd_mychip *chip = ac97->private_data;
 	int codec_index = ac97->num;
 
-	//	if (snd_BUG_ON(codec_index != mychip_PRIMARY_CODEC_INDEX &&
-	//		       codec_index != mychip_SECONDARY_CODEC_INDEX))
-	//		return;
+	//   if (snd_BUG_ON(codec_index != mychip_PRIMARY_CODEC_INDEX &&
+	//               codec_index != mychip_SECONDARY_CODEC_INDEX))
+	//        return;
 
 	snd_mychip_codec_write(chip, reg, val, codec_index);
 }
@@ -386,7 +387,7 @@ static void snd_mychip_set_capture_sample_rate(struct snd_mychip *chip, unsigned
 	 *     coeffIncr = neg(dividend((Fs,out * 2^23) / Fs,in))
 	 *     phiIncr:ulOther = dividend:remainder((Fs,in * 2^26) / Fs,out)
 	 *     correctionPerGOF:correctionPerSec =
-	 *	    dividend:remainder(ulOther / GOF_PER_SEC)
+	 *       dividend:remainder(ulOther / GOF_PER_SEC)
 	 *     initialDelay = dividend(((24 * Fs,in) + Fs,out - 1) / Fs,out)
 	 */
 
@@ -461,43 +462,43 @@ static void snd_mychip_set_capture_sample_rate(struct snd_mychip *chip, unsigned
 //每个card 设备可以最多拥有4个 pcm 实例。一个pcm实例对应予一个pcm设备文件。
 //根据硬件手册定义硬件
 static struct snd_pcm_hardware snd_mychip_playback ={
-	.info =			(SNDRV_PCM_INFO_MMAP |
+	.info =             (SNDRV_PCM_INFO_MMAP |
 			SNDRV_PCM_INFO_INTERLEAVED | 
 			SNDRV_PCM_INFO_BLOCK_TRANSFER /*|*/
 			/*SNDRV_PCM_INFO_RESUME*/),
-	.formats =		(SNDRV_PCM_FMTBIT_S8 | SNDRV_PCM_FMTBIT_U8 |
+	.formats =          (SNDRV_PCM_FMTBIT_S8 | SNDRV_PCM_FMTBIT_U8 |
 			SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S16_BE |
 			SNDRV_PCM_FMTBIT_U16_LE | SNDRV_PCM_FMTBIT_U16_BE),
-	.rates =		SNDRV_PCM_RATE_CONTINUOUS | SNDRV_PCM_RATE_8000_48000,
-	.rate_min =		5500,
-	.rate_max =		48000,
-	.channels_min =		1,
-	.channels_max =		2,
-	.buffer_bytes_max =	(256 * 1024),
-	.period_bytes_min =	MYCHIP_MIN_PERIOD_SIZE,
-	.period_bytes_max =	MYCHIP_MAX_PERIOD_SIZE,
-	.periods_min =		MYCHIP_FRAGS,
-	.periods_max =		1024,
-	.fifo_size =		0,
+	.rates =       SNDRV_PCM_RATE_CONTINUOUS | SNDRV_PCM_RATE_8000_48000,
+	.rate_min =         5500,
+	.rate_max =         48000,
+	.channels_min =          1,
+	.channels_max =          2,
+	.buffer_bytes_max = (256 * 1024),
+	.period_bytes_min = MYCHIP_MIN_PERIOD_SIZE,
+	.period_bytes_max = MYCHIP_MAX_PERIOD_SIZE,
+	.periods_min =      MYCHIP_FRAGS,
+	.periods_max =      1024,
+	.fifo_size =        0,
 };
 
 static struct snd_pcm_hardware snd_mychip_capture ={
-	.info =			(SNDRV_PCM_INFO_MMAP |
+	.info =             (SNDRV_PCM_INFO_MMAP |
 			SNDRV_PCM_INFO_INTERLEAVED |
 			SNDRV_PCM_INFO_BLOCK_TRANSFER /*|*/
 			/*SNDRV_PCM_INFO_RESUME*/),
-	.formats =		SNDRV_PCM_FMTBIT_S16_LE,
-	.rates =		SNDRV_PCM_RATE_CONTINUOUS | SNDRV_PCM_RATE_8000_48000,
-	.rate_min =		5500,
-	.rate_max =		48000,
-	.channels_min =		2,
-	.channels_max =		2,
-	.buffer_bytes_max =	(256 * 1024),
-	.period_bytes_min =	MYCHIP_MIN_PERIOD_SIZE,
-	.period_bytes_max =	MYCHIP_MAX_PERIOD_SIZE,
-	.periods_min =		MYCHIP_FRAGS,
-	.periods_max =		1024,
-	.fifo_size =		0,
+	.formats =          SNDRV_PCM_FMTBIT_S16_LE,
+	.rates =       SNDRV_PCM_RATE_CONTINUOUS | SNDRV_PCM_RATE_8000_48000,
+	.rate_min =         5500,
+	.rate_max =         48000,
+	.channels_min =          2,
+	.channels_max =          2,
+	.buffer_bytes_max = (256 * 1024),
+	.period_bytes_min = MYCHIP_MIN_PERIOD_SIZE,
+	.period_bytes_max = MYCHIP_MAX_PERIOD_SIZE,
+	.periods_min =      MYCHIP_FRAGS,
+	.periods_max =      1024,
+	.fifo_size =        0,
 };
 
 // 关于peroid的概念有这样的描述：The “period” is a term that corresponds to a fragment in the OSS world. The period defines the size at which a PCM interrupt is generated. 
@@ -565,7 +566,7 @@ static int snd_mychip_playback_open_channel(struct snd_pcm_substream *substream,
 
 
 	//设定runtime硬件参数  
-	runtime->private_data = dma;	
+	runtime->private_data = dma;  
 	runtime->hw = snd_mychip_playback;
 	//runtime->private_free = snd_mychip_pcm_free_substream;
 
@@ -750,14 +751,23 @@ static struct snd_pcm_ops snd_mychip_capture_ops;
 //open函数为PCM模块设定支持的传输模式、数据格式、通道数、period等参数，并为playback/capture stream分配相应的DMA通道。
 static int snd_mychip_capture_open(struct snd_pcm_substream *substream){
 	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
+	struct snd_pcm_runtime *runtime = substream->runtime;  
+	struct mychip_dma_stream *dma; 
+
+	// 分配dma内存空间，设置chip->play = dma
+	dma = kzalloc(sizeof(*dma), GFP_KERNEL);
+	if(dma == NULL){
+		return -ENOMEM;
+	}
 	if (snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV, snd_dma_pci_data(chip->pci),
 				PAGE_SIZE, &chip->capt->hw_buf) < 0)
 		return -ENOMEM;
-	chip->capt->substream = substream;
-	substream->runtime->hw = snd_mychip_capture;
-
+	dma->substream = substream;
+	chip->capt = dma;
+	runtime->hw = snd_mychip_capture;
+	runtime->private_data = dma;
 	//if (chip->accept_valid)
-	//	substream->runtime->hw.info |= SNDRV_PCM_INFO_MMAP_VALID;
+	//   substream->runtime->hw.info |= SNDRV_PCM_INFO_MMAP_VALID;
 	return 0;
 }
 
@@ -849,6 +859,7 @@ static int snd_mychip_capture_trigger(struct snd_pcm_substream *substream, int c
 			tmp = snd_mychip_peekBA1(chip, BA1_CCTL);
 			tmp &= 0xffff0000;
 			snd_mychip_pokeBA1(chip, BA1_CCTL, chip->capt->ctl | tmp);
+			FUNC_LOG();
 			break;  
 
 		case SNDRV_PCM_TRIGGER_STOP:  
@@ -856,6 +867,7 @@ static int snd_mychip_capture_trigger(struct snd_pcm_substream *substream, int c
 			tmp = snd_mychip_peekBA1(chip, BA1_CCTL);
 			tmp &= 0xffff0000;
 			snd_mychip_pokeBA1(chip, BA1_CCTL, tmp);
+			FUNC_LOG();
 			break;  
 
 		default:  
@@ -938,7 +950,7 @@ static int __init snd_mychip_new_pcm(struct snd_mychip* chip){
 //info回调函数用于获取control的详细信息。它的主要工作就是填充通过参数传入的snd_ctl_elem_info对象，以下例子是一个具有单个元素的boolean型control的info回调
 static int snd_my_ctl_info(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_info *uinfo){  
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;    //type字段指出该control的值类型，值类型可以是BOOLEAN, INTEGER, ENUMERATED, BYTES,IEC958和INTEGER64之一
-	uinfo->count = 1;		//count字段指出了改control中包含有多少个元素单元，比如，立体声的音量control左右两个声道的音量值，它的count字段等于2。
+	uinfo->count = 1;        //count字段指出了改control中包含有多少个元素单元，比如，立体声的音量control左右两个声道的音量值，它的count字段等于2。
 	uinfo->value.integer.min = 0;    //value字段是一个联合体（union），value的内容和control的类型有关。可以指定最大、最小和步长。
 	uinfo->value.integer.max = 100;
 	uinfo->value.integer.step = 1; 
@@ -1019,6 +1031,44 @@ static void snd_mychip_proc_stop(struct snd_mychip *chip)
 	 */
 	snd_mychip_pokeBA1(chip, BA1_SPCR, 0);
 }
+int snd_mychip_download(struct snd_mychip *chip,
+		u32 *src,
+		unsigned long offset,
+		unsigned long len)
+{
+	void __iomem *dst;
+	unsigned int bank = offset >> 16;
+	offset = offset & 0xffff;
+
+	//if (snd_BUG_ON((offset & 3) || (len & 3)))
+	// return -EINVAL;
+	dst = chip->ba1_region.idx[bank].remap_addr + offset;
+	len /= sizeof(u32);
+
+	/* writel already converts 32-bit value to right endianess */
+	while (len-- > 0) {
+		writel(*src++, dst);
+		dst += sizeof(u32);
+	}
+	return 0;
+}
+
+int snd_mychip_download_image(struct snd_mychip *chip)
+{
+	int idx, err;
+	unsigned long offset = 0;
+
+	for (idx = 0; idx < BA1_MEMORY_COUNT; idx++) {
+		if ((err = snd_mychip_download(chip,
+						&BA1Struct.map[offset],
+						BA1Struct.memory[idx].offset,
+						BA1Struct.memory[idx].size)) < 0)
+			return err;
+		offset += BA1Struct.memory[idx].size >> 2;
+	} 
+	return 0;
+}
+
 static void snd_mychip_reset(struct snd_mychip *chip){
 	int idx;
 
@@ -1057,12 +1107,12 @@ static void snd_mychip_hw_stop(struct snd_mychip *chip)
 	tmp = snd_mychip_peekBA1(chip, BA1_PFIE);
 	tmp &= ~0x0000f03f;
 	tmp |=  0x00000010;
-	snd_mychip_pokeBA1(chip, BA1_PFIE, tmp);	/* playback interrupt disable */
+	snd_mychip_pokeBA1(chip, BA1_PFIE, tmp);     /* playback interrupt disable */
 
 	tmp = snd_mychip_peekBA1(chip, BA1_CIE);
 	tmp &= ~0x0000003f;
 	tmp |=  0x00000011;
-	snd_mychip_pokeBA1(chip, BA1_CIE, tmp);	/* capture interrupt disable */
+	snd_mychip_pokeBA1(chip, BA1_CIE, tmp); /* capture interrupt disable */
 
 	/*
 	 *  Stop playback DMA.
@@ -1424,16 +1474,16 @@ static void snd_mychip_enable_stream_irqs(struct snd_mychip *chip)
 
 	tmp = snd_mychip_peekBA1(chip, BA1_PFIE);
 	tmp &= ~0x0000f03f;
-	snd_mychip_pokeBA1(chip, BA1_PFIE, tmp);	/* playback interrupt enable */
+	snd_mychip_pokeBA1(chip, BA1_PFIE, tmp);     /* playback interrupt enable */
 
 	tmp = snd_mychip_peekBA1(chip, BA1_CIE);
 	tmp &= ~0x0000003f;
 	tmp |=  0x00000001;
-	snd_mychip_pokeBA1(chip, BA1_CIE, tmp);	/* capture interrupt enable */
+	snd_mychip_pokeBA1(chip, BA1_CIE, tmp); /* capture interrupt enable */
 }
 
 int __init snd_mychip_start_dsp(struct snd_mychip *chip)
-{	
+{    
 	unsigned int tmp;
 	/*
 	 *  Reset the processor.
@@ -1443,11 +1493,11 @@ int __init snd_mychip_start_dsp(struct snd_mychip *chip)
 	 *  Download the image to the processor.
 	 */
 	/* old image */
-	//if (snd_cs46xx_download_image(chip) < 0) {
-	//	snd_printk(KERN_ERR "image download error\n");
-	//	return -EIO;
-	//}
-
+	if (snd_mychip_download_image(chip) < 0) {
+		snd_printk(KERN_ERR "image download error\n");
+		return -EIO;
+	}
+	FUNC_LOG();
 	/*
 	 *  Stop playback DMA.
 	 */
@@ -1498,10 +1548,10 @@ static int __init snd_mychip_create(struct snd_card *card, struct pci_dev *pci, 
 	//检查PCI是否可用，设置28bit DMA
 	// DMA_BIT_MASK(28)  代替 DMA_28BIT_MASK
 	// if (pci_set_dma_mask(pci, DMA_BIT_MASK(28)) < 0 ||
-	//		pci_set_consistent_dma_mask(pci,DMA_BIT_MASK(28)) < 0 ){
-	//	FUNC_LOG();
-	//		pci_disable_device(pci);
-	//	return -ENXIO;
+	//        pci_set_consistent_dma_mask(pci,DMA_BIT_MASK(28)) < 0 ){
+	//   FUNC_LOG();
+	//        pci_disable_device(pci);
+	//   return -ENXIO;
 	// }
 
 	//分配内存，并初始化为0
@@ -1749,3 +1799,4 @@ module_exit(pci_mydriver_exit);
 
 
 // TODO CAPTURE
+
