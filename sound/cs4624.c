@@ -55,8 +55,8 @@ MODULE_DEVICE_TABLE(pci, snd_mychip_ids);
 #define MYCHIP_BA1_PRG_SIZE     0x7000
 #define MYCHIP_BA1_REG_SIZE     0x0100
 
-#define MYCHIP_MIN_PERIOD_SIZE 64
-#define MYCHIP_MAX_PERIOD_SIZE 1024*1024
+#define MYCHIP_MIN_PERIOD_SIZE 2048
+#define MYCHIP_MAX_PERIOD_SIZE 2048
 #define MYCHIP_FRAGS 2
 
 #define MYCHIP_FIFO_SIZE 32
@@ -696,8 +696,6 @@ static int snd_mychip_playback_prepare(struct snd_pcm_substream *substream){
 // 当pcm开始、停止、暂停的时候都会调用trigger函数。
 // Trigger函数里面的操作应该是原子的，不要在调用这些操作时进入睡眠，trigger函数应尽量小，甚至仅仅是触发DMA。
 static int snd_mychip_playback_trigger(struct snd_pcm_substream *substream, int cmd){
-
-	struct mychip_dma_stream *dma = substream->runtime->private_data;
 	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
 	int res = 0;  
 	unsigned int tmp;
@@ -707,12 +705,12 @@ static int snd_mychip_playback_trigger(struct snd_pcm_substream *substream, int 
 		case SNDRV_PCM_TRIGGER_START:  
 		case SNDRV_PCM_TRIGGER_RESUME:  
 			FUNC_LOG();
-			if (substream->runtime->periods != MYCHIP_FRAGS)
+			if (substream->runtime->periods != MYCHIP_FRAGS){
 				snd_mychip_playback_transfer(substream);
+			}
 			tmp = snd_mychip_peekBA1(chip, BA1_PCTL);
 			tmp &= 0x0000ffff;
 			FUNC_LOG();
-			//snd_mychip_pokeBA1(chip, BA1_PCTL, chip->play_ctl | tmp);
 			snd_mychip_pokeBA1(chip, BA1_PCTL, chip->play_ctl | tmp);
 			break;  
 
@@ -721,7 +719,7 @@ static int snd_mychip_playback_trigger(struct snd_pcm_substream *substream, int 
 			tmp = snd_mychip_peekBA1(chip, BA1_PCTL);
 			tmp &= 0x0000ffff;
 			snd_mychip_pokeBA1(chip, BA1_PCTL, tmp);
-			//prtd->state &= ~ST_RUNNING;  
+			FUNC_LOG();
 			//dma_ctrl(prtd->params->channel, DMAOP_STOP); //DMA停止  
 			break;  
 
@@ -760,7 +758,8 @@ static int snd_mychip_capture_open(struct snd_pcm_substream *substream){
 		return -ENOMEM;
 	}
 	if (snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV, snd_dma_pci_data(chip->pci),
-				PAGE_SIZE, &chip->capt->hw_buf) < 0)
+				PAGE_SIZE, &dma->hw_buf) < 0)
+		kfree(dma);
 		return -ENOMEM;
 	dma->substream = substream;
 	chip->capt = dma;
@@ -1148,6 +1147,9 @@ static void snd_mychip_hw_stop(struct snd_mychip *chip)
 static int __exit snd_mychip_free(struct snd_mychip *chip){
 	int idx;
 	struct snd_mychip_region *region;
+	if (chip->ba0_region.idx[0].resource)
+		snd_mychip_hw_stop(chip);
+
 	if (chip->irq >= 0){
 		free_irq(chip->irq, chip);
 	}
@@ -1160,8 +1162,6 @@ static int __exit snd_mychip_free(struct snd_mychip *chip){
 		release_and_free_resource(region->resource);
 	}
 
-	if (chip->irq >= 0)
-		free_irq(chip->irq, chip);
 	//disable PCI入口
 	pci_disable_device(chip->pci);
 	//释放内存
