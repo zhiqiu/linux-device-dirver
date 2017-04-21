@@ -760,7 +760,7 @@ static int snd_mychip_capture_open(struct snd_pcm_substream *substream){
 	if (snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV, snd_dma_pci_data(chip->pci),
 				PAGE_SIZE, &dma->hw_buf) < 0)
 		kfree(dma);
-		return -ENOMEM;
+	return -ENOMEM;
 	dma->substream = substream;
 	chip->capt = dma;
 	runtime->hw = snd_mychip_capture;
@@ -945,14 +945,34 @@ static int __init snd_mychip_new_pcm(struct snd_mychip* chip){
 
 //---------------CONTROL--------------------
 
+static void snd_mychip_mixer_free_ac97_bus(struct snd_ac97_bus *bus)
+{
+	struct snd_mychip *chip = bus->private_data;
 
+	chip->ac97_bus = NULL;
+}
+
+static void snd_mychip_mixer_free_ac97(struct snd_ac97 *ac97)
+{
+	struct snd_mychip *chip = ac97->private_data;
+
+	//if (snd_BUG_ON(ac97 != chip->ac97[CS46XX_PRIMARY_CODEC_INDEX] &&
+	//	       ac97 != chip->ac97[CS46XX_SECONDARY_CODEC_INDEX]))
+	//	return;
+
+	if (ac97 == chip->ac97[MYCHIP_PRIMARY_CODEC_INDEX]) {
+		chip->ac97[MYCHIP_PRIMARY_CODEC_INDEX] = NULL;
+		//chip->eapd_switch = NULL;
+	}
+	else
+		chip->ac97[MYCHIP_SECONDARY_CODEC_INDEX] = NULL;
+}
 //info回调函数用于获取control的详细信息。它的主要工作就是填充通过参数传入的snd_ctl_elem_info对象，以下例子是一个具有单个元素的boolean型control的info回调
 static int snd_my_ctl_info(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_info *uinfo){  
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;    //type字段指出该control的值类型，值类型可以是BOOLEAN, INTEGER, ENUMERATED, BYTES,IEC958和INTEGER64之一
-	uinfo->count = 1;        //count字段指出了改control中包含有多少个元素单元，比如，立体声的音量control左右两个声道的音量值，它的count字段等于2。
+	uinfo->count = 2;        //count字段指出了改control中包含有多少个元素单元，比如，立体声的音量control左右两个声道的音量值，它的count字段等于2。
 	uinfo->value.integer.min = 0;    //value字段是一个联合体（union），value的内容和control的类型有关。可以指定最大、最小和步长。
-	uinfo->value.integer.max = 100;
-	uinfo->value.integer.step = 1; 
+	uinfo->value.integer.max = 0x7fff;
 	return 0;  
 }  
 
@@ -961,10 +981,10 @@ static int snd_my_ctl_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_val
 	struct mychip *chip = snd_kcontrol_chip(kcontrol);
 	//ucontrol->value.integer.value[0] = get_some_value(chip);
 	//如果private字段这样设定的 .private_value = reg | (shift << 16) | (mask << 24);
-	//int reg = kcontrol->private_value & 0xff;
-	//int shift = (kcontrol->private_value >> 16) & 0xff;
-	//int mask = (kcontrol->private_value >> 24) & 0xff;
-
+	int reg = kcontrol->private_value;
+	unsigned int val = snd_mychip_peekBA1(chip, reg);
+	ucontrol->value.integer.value[0] = 0xffff - (val >> 16);
+	ucontrol->value.integer.value[1] = 0xffff - (val & 0xffff);
 	return 0; 
 }
 
@@ -972,26 +992,116 @@ static int snd_my_ctl_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_val
 // 当control的值被改变时，put回调必须要返回1，如果值没有被改变，则返回0。如果发生了错误，则返回一个负数的错误号。
 static int snd_my_ctl_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol){
 	struct mychip *chip = snd_kcontrol_chip(kcontrol);
+	int reg = kcontrol->private_value;
+	unsigned int val = ((0xffff - ucontrol->value.integer.value[0]) << 16 | 
+			(0xffff - ucontrol->value.integer.value[1]));
+	unsigned int current_value = snd_mychip_peekBA1(chip, reg);
 	int changed = 0;  
-	//if (chip->current_value !=  
-	//    ucontrol->value.integer.value[0]) {  
-	//    change_current_value(chip, ucontrol->value.integer.value[0]);  
-	//    changed = 1;  
-	//}  
-	return changed;  
+	if (current_value != val) {  
+		snd_mychip_pokeBA1(chip, reg, val);
+		changed = 1; 
+	}  
+	return changed;
 }  
-static struct snd_kcontrol_new snd_mychip_control = {
-	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,  //iface字段指出了control的类型
-	.name = "mychip_control",     //因为control的作用是按名字来归类的
-	.index = 0,    //index字段用于保存该control的在该卡中的编号如果声卡中有不止一个codec，每个codec中有相同名字的control，这时我们可以通过index来区分这些controls。当
-	//index为0时，则可以忽略这种区分策略。
-	.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,   //access字段包含了该control的访问类型。每一个bit代表一种访问类型，这些访问类型可以多个“或”运算组合在一起。未定义（.access==0），此时也认为是READWRITE类型。
-	.private_value = 0xffff,    //private_value字段包含了一个任意的长整数类型值。该值可以通过info，get，put这几个回调函数访问。你可以自己决定如何使用该字段，例如可以
-	//把它拆分成多个位域，又或者是一个指针，指向某一个数据结构。
-	.info = snd_my_ctl_info,    // 音量信息
-	.get = snd_my_ctl_get,      // 读音量
-	.put = snd_my_ctl_put,      // 写音量
+
+static struct snd_kcontrol_new snd_mychip_controls[] = {
+	{	
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,  //iface字段指出了control的类型
+		.name = "DAC volume",     //因为control的作用是按名字来归类的
+		//.index = 0,    //index字段用于保存该control的在该卡中的编号如果声卡中有不止一个codec，每个codec中有相同名字的control，这时我们可以通过index来区分这些controls。当
+		//index为0时，则可以忽略这种区分策略。
+		//.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,   //access字段包含了该control的访问类型。每一个bit代表一种访问类型，这些访问类型可以多个“或”运算组合在一起。未定义（.access==0），此时也认为是READWRITE类型。
+		//.private_value = 0xffff,    //private_value字段包含了一个任意的长整数类型值。该值可以通过info，get，put这几个回调函数访问。你可以自己决定如何使用该字段，例如可以
+		//把它拆分成多个位域，又或者是一个指针，指向某一个数据结构。
+		.info = snd_my_ctl_info,    // 音量信息
+		.get = snd_my_ctl_get,      // 读音量
+		.put = snd_my_ctl_put,      // 写音量
+		.private_value = BA1_PVOL,
+	},
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,  //iface字段指出了control的类型
+		.name = "ADC volume",     //因为control的作用是按名字来归类的
+//		.index = 0,    //index字段用于保存该control的在该卡中的编号如果声卡中有不止一个codec，每个codec中有相同名字的control，这时我们可以通过index来区分这些controls。当
+		//index为0时，则可以忽略这种区分策略。
+//		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,   //access字段包含了该control的访问类型。每一个bit代表一种访问类型，这些访问类型可以多个“或”运算组合在一起。未定义（.access==0），此时也认为是READWRITE类型。
+//		.private_value = 0xffff,    //private_value字段包含了一个任意的长整数类型值。该值可以通过info，get，put这几个回调函数访问。你可以自己决定如何使用该字段，例如可以
+		//把它拆分成多个位域，又或者是一个指针，指向某一个数据结构。
+		.info = snd_my_ctl_info,    // 音量信息
+		.get = snd_my_ctl_get,      // 读音量
+		.put = snd_my_ctl_put,      // 写音量
+		.private_value = BA1_CVOL,
+	},
+
 };
+
+static int __init mychip_detect_codec(struct snd_mychip *chip, int codec)
+{
+	int idx, err;
+	struct snd_ac97_template ac97;
+
+	memset(&ac97, 0, sizeof(ac97));
+	ac97.private_data = chip;
+	ac97.private_free = snd_mychip_mixer_free_ac97;
+	ac97.num = codec;
+
+	if (codec == MYCHIP_SECONDARY_CODEC_INDEX) {
+		snd_mychip_codec_write(chip, AC97_RESET, 0, codec);
+		udelay(10);
+		if (snd_mychip_codec_read(chip, AC97_RESET, codec) & 0x8000) {
+			snd_printdd("snd_mychip: seconadry codec not present\n");
+			return -ENXIO;
+		}
+	}
+
+	snd_mychip_codec_write(chip, AC97_MASTER, 0x8000, codec);
+	for (idx = 0; idx < 100; ++idx) {
+		if (snd_mychip_codec_read(chip, AC97_MASTER, codec) == 0x8000) {
+			err = snd_ac97_mixer(chip->ac97_bus, &ac97, &chip->ac97[codec]);
+			return err;
+		}
+		msleep(10);
+	}
+	snd_printdd("snd_mychip: codec %d detection timeout\n", codec);
+	return -ENXIO;
+}
+
+static int __init snd_mychip_new_mixer(struct snd_mychip *chip){
+	struct snd_card *card = chip->card;
+	struct snd_ctl_elem_id id;
+	int i, err;
+	static struct snd_ac97_bus_ops ops = {
+		.write = snd_mychip_ac97_write,
+		.read = snd_mychip_ac97_read,
+	};
+	chip->nr_ac97_codecs = 0;
+	snd_printdd("snd_mychip: detecting primary codec\n");
+	if ((err = snd_ac97_bus(card, 0, &ops, chip, &chip->ac97_bus)) < 0){
+		return err;
+	}
+	chip->ac97_bus->private_free = snd_mychip_mixer_free_ac97_bus;
+
+	if (mychip_detect_codec(chip, MYCHIP_PRIMARY_CODEC_INDEX) < 0)
+		return -ENXIO;
+	chip->nr_ac97_codecs = 1;
+
+	for (i = 0; i < ARRAY_SIZE(snd_mychip_controls); i++) {
+		struct snd_kcontrol *kctl;
+		kctl = snd_ctl_new1(&snd_mychip_controls[i], chip);
+		if ((err = snd_ctl_add(card, kctl)) < 0)
+			return err;
+	}
+
+	//memset(&id, 0, sizeof(id));
+	//id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
+	//strcpy(id.name, "External Amplifier");
+	//chip->eapd_switch = snd_ctl_find_id(chip->card, &id);
+	//err = snd_ctl_add(card, snd_ctl_new1(&snd_mychip_control, chip));  
+	return 0;
+}
+
+
+
+
 
 
 //---------------mychip-----------------------
@@ -1195,14 +1305,19 @@ static irqreturn_t snd_mychip_interrupt(int irq, void *dev_id)
 		snd_mychip_pokeBA0(chip, BA0_HICR, HICR_CHGM | HICR_IEV);
 		return IRQ_NONE;
 	}
+	//FUNC_LOG();
 	/* old dsp */
 	if ((status1 & HISR_VC0) && chip->play) {
-		if (chip->play->substream)
+		if (chip->play->substream){
 			snd_pcm_period_elapsed(chip->play->substream);
+	//		FUNC_LOG();
+		}
 	}
 	if ((status1 & HISR_VC1) && chip->pcm) {
-		if (chip->capt->substream)
+		if (chip->capt->substream){
+	//		FUNC_LOG();
 			snd_pcm_period_elapsed(chip->capt->substream);
+		}
 	}
 
 
@@ -1735,11 +1850,12 @@ static int __init snd_mychip_probe(struct pci_dev *pci, const struct pci_device_
 	}
 
 	//创建mixer control设备
-	err = snd_ctl_add(card, snd_ctl_new1(&snd_mychip_control, chip));  
-	if (err < 0){
+	if((err = snd_mychip_new_mixer(chip)) < 0){
 		snd_card_free(card);
 		return err;
 	}
+
+
 	printk(KERN_EMERG "cs4624: snd_control created, control = %p", &pcm);
 
 	if ((err = snd_mychip_start_dsp(chip)) < 0) {
@@ -1799,4 +1915,5 @@ module_exit(pci_mydriver_exit);
 
 
 // TODO CAPTURE
+
 
