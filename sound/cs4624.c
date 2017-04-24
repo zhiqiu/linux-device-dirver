@@ -503,7 +503,7 @@ static struct snd_pcm_hardware snd_mychip_capture ={
 
 // 关于peroid的概念有这样的描述：The “period” is a term that corresponds to a fragment in the OSS world. The period defines the size at which a PCM interrupt is generated. 
 // peroid的概念很重要
-static unsigned int period_sizes[] = { 64, 128, 256, 512, 1024, 2048, 4096, 8192 };
+static unsigned int period_sizes[] = { 32, 64, 128, 256, 512, 1024, 2048 };
 
 static struct snd_pcm_hw_constraint_list hw_constraints_period_sizes = {
 	.count = ARRAY_SIZE(period_sizes),
@@ -918,7 +918,7 @@ static int __init snd_mychip_new_pcm(struct snd_mychip* chip){
 	struct snd_pcm *pcm;
 	int err;
 	//    int snd_pcm_new(struct snd_card *card, const char *id, int device, int playback_count, int capture_count, struct snd_pcm ** rpcm);
-	if ((err = snd_pcm_new(chip->card, "My Chip", 0 , 1, 1, &pcm) < 0)){
+	if ((err = snd_pcm_new(chip->card, "My Chip", 0 , 1, 1, &pcm)) < 0){
 		return err;
 	}
 	pcm->private_data = chip;
