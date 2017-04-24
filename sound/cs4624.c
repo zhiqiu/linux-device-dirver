@@ -579,6 +579,7 @@ static int snd_mychip_playback_open_channel(struct snd_pcm_substream *substream,
 }
 
 static struct snd_pcm_ops snd_mychip_playback_ops;
+static struct snd_pcm_ops snd_mychip_playback_indirect_ops;
 //open函数为PCM模块设定支持的传输模式、数据格式、通道数、period等参数，并为playback/capture stream分配相应的DMA通道。
 static int snd_mychip_playback_open(struct snd_pcm_substream *substream){
 	snd_printdd("open front channel\n");
@@ -608,6 +609,7 @@ static int snd_mychip_playback_hw_params(struct snd_pcm_substream *substream, st
 		runtime->dma_addr = dma->hw_buf.addr;
 		runtime->dma_bytes = dma->hw_buf.bytes;
 		substream->ops = &snd_mychip_playback_ops;
+		FUNC_LOG();
 	}else {
 		if (runtime->dma_area == dma->hw_buf.area) {
 			runtime->dma_area = NULL;
@@ -617,7 +619,8 @@ static int snd_mychip_playback_hw_params(struct snd_pcm_substream *substream, st
 		if ((err = snd_pcm_lib_malloc_pages(substream, params_buffer_bytes(hw_params))) < 0) {
 			return err;
 		}
-		substream->ops = &snd_mychip_playback_ops;
+		substream->ops = &snd_mychip_playback_indirect_ops;
+		FUNC_LOG();
 	}
 
 	return 0;  
@@ -743,6 +746,17 @@ static snd_pcm_uframes_t snd_mychip_playback_direct_pointer(struct snd_pcm_subst
 	ptr -= dma->hw_buf.addr;
 	return ptr >> dma->shift;
 }
+static snd_pcm_uframes_t snd_mychip_playback_indirect_pointer(struct snd_pcm_substream *substream){
+	struct mychip_dma_stream *dma = substream->runtime->private_data;
+	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
+
+	size_t ptr;
+	ptr = snd_mychip_peekBA1(chip, BA1_PBA);
+
+	ptr -= dma->hw_buf.addr;
+	return snd_pcm_indirect_playback_pointer(substream, &dma->pcm_rec, ptr);
+}
+
 
 
 static struct snd_pcm_ops snd_mychip_capture_ops;
@@ -901,6 +915,18 @@ static struct snd_pcm_ops snd_mychip_playback_ops = {
 	.pointer = snd_mychip_playback_direct_pointer,
 };
 
+static struct snd_pcm_ops snd_mychip_playback_indirect_ops = {
+	.open = snd_mychip_playback_open,
+	.close = snd_mychip_playback_close,
+	.ioctl = snd_pcm_lib_ioctl,
+	.hw_params = snd_mychip_playback_hw_params,
+	.hw_free = snd_mychip_playback_hw_free,
+	.prepare = snd_mychip_playback_prepare,
+	.trigger = snd_mychip_playback_trigger,
+	.pointer = snd_mychip_playback_indirect_pointer,
+	.ack =	snd_mychip_playback_transfer,
+};
+
 static struct snd_pcm_ops snd_mychip_capture_ops = {
 	.open = snd_mychip_capture_open,
 	.close = snd_mychip_capture_close,
@@ -1021,10 +1047,10 @@ static struct snd_kcontrol_new snd_mychip_controls[] = {
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,  //iface字段指出了control的类型
 		.name = "ADC volume",     //因为control的作用是按名字来归类的
-//		.index = 0,    //index字段用于保存该control的在该卡中的编号如果声卡中有不止一个codec，每个codec中有相同名字的control，这时我们可以通过index来区分这些controls。当
+		//		.index = 0,    //index字段用于保存该control的在该卡中的编号如果声卡中有不止一个codec，每个codec中有相同名字的control，这时我们可以通过index来区分这些controls。当
 		//index为0时，则可以忽略这种区分策略。
-//		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,   //access字段包含了该control的访问类型。每一个bit代表一种访问类型，这些访问类型可以多个“或”运算组合在一起。未定义（.access==0），此时也认为是READWRITE类型。
-//		.private_value = 0xffff,    //private_value字段包含了一个任意的长整数类型值。该值可以通过info，get，put这几个回调函数访问。你可以自己决定如何使用该字段，例如可以
+		//		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,   //access字段包含了该control的访问类型。每一个bit代表一种访问类型，这些访问类型可以多个“或”运算组合在一起。未定义（.access==0），此时也认为是READWRITE类型。
+		//		.private_value = 0xffff,    //private_value字段包含了一个任意的长整数类型值。该值可以通过info，get，put这几个回调函数访问。你可以自己决定如何使用该字段，例如可以
 		//把它拆分成多个位域，又或者是一个指针，指向某一个数据结构。
 		.info = snd_my_ctl_info,    // 音量信息
 		.get = snd_my_ctl_get,      // 读音量
@@ -1310,12 +1336,12 @@ static irqreturn_t snd_mychip_interrupt(int irq, void *dev_id)
 	if ((status1 & HISR_VC0) && chip->play) {
 		if (chip->play->substream){
 			snd_pcm_period_elapsed(chip->play->substream);
-	//		FUNC_LOG();
+			//		FUNC_LOG();
 		}
 	}
 	if ((status1 & HISR_VC1) && chip->pcm) {
 		if (chip->capt->substream){
-	//		FUNC_LOG();
+			//		FUNC_LOG();
 			snd_pcm_period_elapsed(chip->capt->substream);
 		}
 	}
