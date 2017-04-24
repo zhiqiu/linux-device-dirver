@@ -1,17 +1,18 @@
 # linux-device-dirver
 
-一个简单的字符设备驱动程序，实现了open，release，read，write，llseek等功能  
-参照《linux设备驱动程序》第三章的代码实现  
-未考虑信号量同步
+CS4624声卡驱动
+参考linux3.1.1 cs46xx驱动代码完成
+
+
 
 usage：  
 #make  
-#sudo ./scull_load  
-#sudo ./test/test  
+#./load_module.sh  
+#aplay test.wav  
 
 
 
 after test  
-#sudo ./scull_unload  
+#./unload_module.sh
 
 
