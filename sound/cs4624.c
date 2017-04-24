@@ -761,21 +761,23 @@ static snd_pcm_uframes_t snd_mychip_playback_indirect_pointer(struct snd_pcm_sub
 
 static struct snd_pcm_ops snd_mychip_capture_ops;
 static struct snd_pcm_ops snd_mychip_capture_indirect_ops;
+
 //open函数为PCM模块设定支持的传输模式、数据格式、通道数、period等参数，并为playback/capture stream分配相应的DMA通道。
 static int snd_mychip_capture_open(struct snd_pcm_substream *substream){
 	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
 	struct snd_pcm_runtime *runtime = substream->runtime;  
 	struct mychip_dma_stream *dma; 
 
-	// 分配dma内存空间，设置chip->play = dma
+	// 分配dma内存空间，设置chip->capt = dma
 	dma = kzalloc(sizeof(*dma), GFP_KERNEL);
 	if(dma == NULL){
 		return -ENOMEM;
 	}
 	if (snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV, snd_dma_pci_data(chip->pci),
-				PAGE_SIZE, &dma->hw_buf) < 0)
+				PAGE_SIZE, &dma->hw_buf) < 0){
 		kfree(dma);
-	return -ENOMEM;
+		return -ENOMEM;
+	}
 	dma->substream = substream;
 	chip->capt = dma;
 	runtime->hw = snd_mychip_capture;
@@ -863,8 +865,6 @@ static int snd_mychip_capture_prepare(struct snd_pcm_substream *substream){
 // 当pcm开始、停止、暂停的时候都会调用trigger函数。
 // Trigger函数里面的操作应该是原子的，不要在调用这些操作时进入睡眠，trigger函数应尽量小，甚至仅仅是触发DMA。
 static int snd_mychip_capture_trigger(struct snd_pcm_substream *substream, int cmd){
-
-	struct mychip_dma_stream *dma = substream->runtime->private_data;
 	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
 	int res = 0;  
 	unsigned int tmp;
@@ -1029,7 +1029,7 @@ static int snd_my_ctl_info(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_in
 
 // 从volume寄存器读数据，放到ucontrol->value.integer.value[0]中
 static int snd_my_ctl_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol){
-	struct mychip *chip = snd_kcontrol_chip(kcontrol);
+	struct snd_mychip *chip = snd_kcontrol_chip(kcontrol);
 	//ucontrol->value.integer.value[0] = get_some_value(chip);
 	//如果private字段这样设定的 .private_value = reg | (shift << 16) | (mask << 24);
 	int reg = kcontrol->private_value;
@@ -1042,7 +1042,7 @@ static int snd_my_ctl_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_val
 // 从volume寄存器写数据
 // 当control的值被改变时，put回调必须要返回1，如果值没有被改变，则返回0。如果发生了错误，则返回一个负数的错误号。
 static int snd_my_ctl_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol){
-	struct mychip *chip = snd_kcontrol_chip(kcontrol);
+	struct snd_mychip *chip = snd_kcontrol_chip(kcontrol);
 	int reg = kcontrol->private_value;
 	unsigned int val = ((0xffff - ucontrol->value.integer.value[0]) << 16 | 
 			(0xffff - ucontrol->value.integer.value[1]));
@@ -1118,7 +1118,6 @@ static int __init mychip_detect_codec(struct snd_mychip *chip, int codec)
 
 static int __init snd_mychip_new_mixer(struct snd_mychip *chip){
 	struct snd_card *card = chip->card;
-	struct snd_ctl_elem_id id;
 	int i, err;
 	static struct snd_ac97_bus_ops ops = {
 		.write = snd_mychip_ac97_write,
@@ -1341,33 +1340,28 @@ static int snd_mychip_dev_free(struct snd_device *device)
 static irqreturn_t snd_mychip_interrupt(int irq, void *dev_id)
 {
 	struct snd_mychip *chip = dev_id;
-	unsigned int status1, dma, val;
-	struct mychip_dma_stream *cdma;
+	unsigned int status;
 
 	if (chip == NULL)
 		return IRQ_NONE;
 
-
 	/*
 	 *  Read the Interrupt Status Register to clear the interrupt
 	 */
-	status1 = snd_mychip_peekBA0(chip, BA0_HISR);
-	if ((status1 & 0x7fffffff) == 0) {
+	status = snd_mychip_peekBA0(chip, BA0_HISR);
+	if ((status & 0x7fffffff) == 0) {
 		snd_mychip_pokeBA0(chip, BA0_HICR, HICR_CHGM | HICR_IEV);
 		return IRQ_NONE;
 	}
-	//FUNC_LOG();
+	//snd_printk(KERN_ERR "mychip: status = %x\n", status);
 	/* old dsp */
-	if ((status1 & HISR_VC0) && chip->play) {
+	if ((status & HISR_VC0) && chip->play) {
 		if (chip->play->substream){
 			snd_pcm_period_elapsed(chip->play->substream);
-			//		FUNC_LOG();
 		}
 	}
-	if ((status1 & HISR_VC1) && chip->capt) {
-		FUNC_LOG();
+	if ((status & HISR_VC1) && chip->capt) {
 		if (chip->capt->substream){
-			//		FUNC_LOG();
 			snd_pcm_period_elapsed(chip->capt->substream);
 		}
 	}
@@ -1836,13 +1830,6 @@ static int __init snd_mychip_create(struct snd_card *card, struct pci_dev *pci, 
 }
 
 
-static struct snd_device_ops mychip_dev_ops = {
-	.dev_free = snd_mychip_dev_free,
-};
-
-
-
-
 static int __init snd_mychip_probe(struct pci_dev *pci, const struct pci_device_id *pci_id){
 
 	struct snd_card *card;
@@ -1890,7 +1877,7 @@ static int __init snd_mychip_probe(struct pci_dev *pci, const struct pci_device_
 	//shortname域是一个更详细的名字。longname域将会在/proc/asound/cards中显示。
 	strcpy(card->driver,"My Chip");
 	strcpy(card->shortname,"My Own Chip 123");
-	sprintf(card->longname,"%s at 0x%1x/0x%1x irq %i",
+	sprintf(card->longname,"%s at 0x%lx/0x%lx irq %i",
 			card->shortname, chip->ba0_addr, chip->ba1_addr, chip->irq);
 
 	//(5)，创建声卡的功能部件（逻辑设备），例如PCM，Mixer，MIDI等
@@ -1927,13 +1914,12 @@ static int __init snd_mychip_probe(struct pci_dev *pci, const struct pci_device_
 	return 0;
 }
 
-static int __exit snd_mychip_remove(struct pci_dev *dev){
+static void __exit snd_mychip_remove(struct pci_dev *dev){
 	struct snd_card *card = pci_get_drvdata(dev);
 	if(card){
 		snd_card_free(card);
 		pci_set_drvdata(dev, NULL);
 	}
-	return 0;
 }
 
 
@@ -1943,10 +1929,6 @@ struct pci_driver mydriver={
 	.id_table = snd_mychip_ids,
 	.probe = snd_mychip_probe,
 	.remove = snd_mychip_remove,
-#ifdef CONFIG_PM
-	//.syspend = mychip_audio_suspend,
-	//.resume = mychip_audio_suspend,
-#endif
 };
 
 static int __init pci_mydriver_init(void){
