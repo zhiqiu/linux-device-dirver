@@ -780,6 +780,7 @@ static int snd_mychip_capture_open(struct snd_pcm_substream *substream){
 	chip->capt = dma;
 	runtime->hw = snd_mychip_capture;
 	runtime->private_data = dma;
+	FUNC_LOG();
 	//if (chip->accept_valid)
 	//   substream->runtime->hw.info |= SNDRV_PCM_INFO_MMAP_VALID;
 	return 0;
@@ -948,7 +949,7 @@ static struct snd_pcm_ops snd_mychip_capture_ops = {
 	.hw_free = snd_mychip_capture_hw_free,
 	.prepare = snd_mychip_capture_prepare,
 	.trigger = snd_mychip_capture_trigger,
-	.pointer = snd_mychip_playback_direct_pointer,
+	.pointer = snd_mychip_capture_direct_pointer,
 };
 
 static struct snd_pcm_ops snd_mychip_capture_indirect_ops = {
@@ -959,7 +960,7 @@ static struct snd_pcm_ops snd_mychip_capture_indirect_ops = {
 	.hw_free = snd_mychip_capture_hw_free,
 	.prepare = snd_mychip_capture_prepare,
 	.trigger = snd_mychip_capture_trigger,
-	.pointer = snd_mychip_playback_indirect_pointer,
+	.pointer = snd_mychip_capture_indirect_pointer,
 	.ack = snd_mychip_capture_transfer,
 };
 
@@ -1363,7 +1364,8 @@ static irqreturn_t snd_mychip_interrupt(int irq, void *dev_id)
 			//		FUNC_LOG();
 		}
 	}
-	if ((status1 & HISR_VC1) && chip->pcm) {
+	if ((status1 & HISR_VC1) && chip->capt) {
+		FUNC_LOG();
 		if (chip->capt->substream){
 			//		FUNC_LOG();
 			snd_pcm_period_elapsed(chip->capt->substream);
