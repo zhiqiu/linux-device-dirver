@@ -760,6 +760,7 @@ static snd_pcm_uframes_t snd_mychip_playback_indirect_pointer(struct snd_pcm_sub
 
 
 static struct snd_pcm_ops snd_mychip_capture_ops;
+static struct snd_pcm_ops snd_mychip_capture_indirect_ops;
 //open函数为PCM模块设定支持的传输模式、数据格式、通道数、period等参数，并为playback/capture stream分配相应的DMA通道。
 static int snd_mychip_capture_open(struct snd_pcm_substream *substream){
 	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
@@ -806,6 +807,7 @@ static int snd_mychip_capture_hw_params(struct snd_pcm_substream *substream, str
 		runtime->dma_area = dma->hw_buf.area;
 		runtime->dma_addr = dma->hw_buf.addr;
 		runtime->dma_bytes = dma->hw_buf.bytes;
+		FUNC_LOG();
 		substream->ops = &snd_mychip_capture_ops;
 	}else {
 		if (runtime->dma_area == dma->hw_buf.area) {
@@ -816,7 +818,8 @@ static int snd_mychip_capture_hw_params(struct snd_pcm_substream *substream, str
 		if ((err = snd_pcm_lib_malloc_pages(substream, params_buffer_bytes(hw_params))) < 0) {
 			return err;
 		}
-		substream->ops = &snd_mychip_capture_ops;
+		substream->ops = &snd_mychip_capture_indirect_ops;
+		FUNC_LOG();
 	}
 
 	return 0;  
@@ -904,6 +907,16 @@ static snd_pcm_uframes_t snd_mychip_capture_direct_pointer(struct snd_pcm_substr
 	return ptr >> dma->shift;
 }
 
+static snd_pcm_uframes_t snd_mychip_capture_indirect_pointer(struct snd_pcm_substream *substream){
+	struct mychip_dma_stream *dma = substream->runtime->private_data;
+	struct snd_mychip *chip = snd_pcm_substream_chip(substream);
+
+	size_t ptr;
+	ptr = snd_mychip_peekBA1(chip, BA1_CBA);
+	ptr -= dma->hw_buf.addr;
+	return snd_pcm_indirect_capture_pointer(substream, &chip->capt->pcm_rec, ptr);
+}
+
 static struct snd_pcm_ops snd_mychip_playback_ops = {
 	.open = snd_mychip_playback_open,
 	.close = snd_mychip_playback_close,
@@ -935,9 +948,20 @@ static struct snd_pcm_ops snd_mychip_capture_ops = {
 	.hw_free = snd_mychip_capture_hw_free,
 	.prepare = snd_mychip_capture_prepare,
 	.trigger = snd_mychip_capture_trigger,
-	//        .pointer =              snd_mychip_playback_direct_pointer,
+	.pointer = snd_mychip_playback_direct_pointer,
 };
 
+static struct snd_pcm_ops snd_mychip_capture_indirect_ops = {
+	.open = snd_mychip_capture_open,
+	.close = snd_mychip_capture_close,
+	.ioctl = snd_pcm_lib_ioctl,
+	.hw_params = snd_mychip_capture_hw_params,
+	.hw_free = snd_mychip_capture_hw_free,
+	.prepare = snd_mychip_capture_prepare,
+	.trigger = snd_mychip_capture_trigger,
+	.pointer = snd_mychip_playback_indirect_pointer,
+	.ack = snd_mychip_capture_transfer,
+};
 
 
 static int __init snd_mychip_new_pcm(struct snd_mychip* chip){
